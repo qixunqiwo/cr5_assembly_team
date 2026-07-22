@@ -1,7 +1,8 @@
 """Shared data types for the five-CR5A scheduling system."""
 
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from enum import Enum
+from typing import List, Optional
 
 
 class TaskStatus(str, Enum):
@@ -44,7 +45,6 @@ class Order:
     priority: int
     quantity: int = 1
     due_time: float = 0.0
-    expected_quality: str = "OK"
     arrival_time: float = 0.0
 
     def to_dict(self) -> dict:
@@ -54,7 +54,6 @@ class Order:
             "priority": self.priority,
             "quantity": self.quantity,
             "due_time": self.due_time,
-            "expected_quality": self.expected_quality,
             "arrival_time": self.arrival_time,
         }
 
@@ -66,7 +65,6 @@ class Order:
             priority=d.get("priority", 1),
             quantity=d.get("quantity", 1),
             due_time=d.get("due_time", 0.0),
-            expected_quality=str(d.get("expected_quality", "OK")).upper(),
             arrival_time=d.get("arrival_time", 0.0),
         )
 
@@ -115,8 +113,7 @@ class TaskResult:
     start_time: float = 0.0
     end_time: float = 0.0
     message: str = ""
-    quality_result: str = ""    # OK / NG (仅 inspection 任务有效)
-    metrics: dict[str, Any] = field(default_factory=dict)
+    quality_result: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -127,7 +124,6 @@ class TaskResult:
             "end_time": self.end_time,
             "message": self.message,
             "quality_result": self.quality_result,
-            "metrics": self.metrics,
         }
 
 
