@@ -33,6 +33,7 @@ class Scheduler(IScheduler):
         self.config = self._load_scheduler_config(self.scheduler_config_path)
         self._callbacks: List[Callable] = []
         self._area_locks: Dict[str, Set[str]] = {}
+        self._station_owners: Dict[str, str] = {}
         self._dispatched_tasks: Set[str] = set()
         self._conflict_count = 0
         self._logical_time = 0.0
@@ -68,6 +69,7 @@ class Scheduler(IScheduler):
             if task.status == TaskStatus.PENDING.value
             and task.task_id not in self._dispatched_tasks
             and self._predecessors_finished(task, tasks)
+            and self._station_flow_allows(task)
         ]
         scoring = self.config.get("scoring", {})
         candidates.sort(
@@ -93,6 +95,7 @@ class Scheduler(IScheduler):
                 candidate for candidate in task.available_robots if candidate != robot_id
             ]
             self._dispatched_tasks.add(task.task_id)
+            self._claim_station_for_task(task)
             idle_robots.remove(robot_id)
             self._reserve_successor_robots(
                 task, tasks, self._logical_time + task.duration
@@ -114,6 +117,7 @@ class Scheduler(IScheduler):
                 task.status = TaskStatus.PENDING.value
                 self._dispatched_tasks.discard(task.task_id)
                 self._release_task_locks(task.task_id)
+                self._release_station_on_interruption(task)
                 self._ready_since[task.task_id] = self._logical_time
 
         self._notify()
@@ -135,6 +139,8 @@ class Scheduler(IScheduler):
 
         self._dispatched_tasks.discard(result.task_id)
         self._release_task_locks(result.task_id)
+        if completed_task:
+            self._release_station_after_task(completed_task)
 
         if (
             completed_task
@@ -144,8 +150,11 @@ class Scheduler(IScheduler):
         ):
             self._quality_by_order[completed_task.order_id] = result.quality_result
 
-        sort_trigger = str(self.config.get("sort_trigger_process", "inspect"))
-        if completed_task and completed_task.process == sort_trigger and result.status == TaskStatus.FINISHED.value:
+        if (
+            completed_task
+            and completed_task.process in ("inspect", "screw")
+            and result.status == TaskStatus.FINISHED.value
+        ):
             quality_result = (
                 result.quality_result
                 if result.quality_result in ("OK", "NG")
@@ -260,3 +269,41 @@ class Scheduler(IScheduler):
             owners.discard(task_id)
             if not owners:
                 del self._area_locks[area]
+
+    def _station_flow_allows(self, task: Task) -> bool:
+        areas = self._task_lock_areas(task)
+        assembly_owner = self._station_owners.get("assembly_fixture")
+        if "assembly_fixture" in areas:
+            if assembly_owner and assembly_owner != task.order_id:
+                return False
+            if not assembly_owner and task.process != "box_feed" and task.predecessors:
+                return False
+
+        inspection_owner = self._station_owners.get("inspection_platform_area")
+        if "inspection_platform_area" in areas:
+            if inspection_owner and inspection_owner != task.order_id:
+                return False
+            if not inspection_owner and task.process != "transfer_to_inspection" and task.predecessors:
+                return False
+        return True
+
+    def _claim_station_for_task(self, task: Task) -> None:
+        if task.process == "box_feed":
+            self._station_owners.setdefault("assembly_fixture", task.order_id)
+        elif task.process == "transfer_to_inspection":
+            self._station_owners.setdefault("inspection_platform_area", task.order_id)
+
+    def _release_station_after_task(self, task: Task) -> None:
+        if task.process == "transfer_to_inspection":
+            if self._station_owners.get("assembly_fixture") == task.order_id:
+                del self._station_owners["assembly_fixture"]
+        elif task.process in ("sort_good", "sort_defect"):
+            if self._station_owners.get("inspection_platform_area") == task.order_id:
+                del self._station_owners["inspection_platform_area"]
+
+    def _release_station_on_interruption(self, task: Task) -> None:
+        if task.process == "box_feed" and self._station_owners.get("assembly_fixture") == task.order_id:
+            del self._station_owners["assembly_fixture"]
+        elif task.process == "transfer_to_inspection":
+            if self._station_owners.get("inspection_platform_area") == task.order_id:
+                del self._station_owners["inspection_platform_area"]

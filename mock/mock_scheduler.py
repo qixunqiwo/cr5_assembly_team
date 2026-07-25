@@ -16,7 +16,6 @@ _PRODUCT_PROCESSES = {
             (ProcessType.TERMINAL_INSTALL, "terminal_supply_area", "R1_TERMINAL_PLACE_TCP", ["R1"], 7, ["terminal_supply_area", "assembly_fixture"]),
             (ProcessType.TRANSFER_TO_INSPECTION, "transfer_area", "R3_PRODUCT_PLACE_INSPECTION_TCP", ["R3"], 8, ["assembly_fixture", "inspection_platform_area"]),
             (ProcessType.INSPECT, "camera_area", "CAMERA_INSPECTION_CENTER", ["CAMERA"], 5, ["inspection_platform_area", "camera_area"]),
-            (ProcessType.SCREW, "inspection_screw_area", "R4_SCREW_PRESS", ["R4"], 9, ["inspection_screw_area", "inspection_platform_area"]),
         ],
     },
     "B": {
@@ -27,7 +26,6 @@ _PRODUCT_PROCESSES = {
             (ProcessType.TERMINAL_INSTALL, "terminal_supply_area", "R1_TERMINAL_PLACE_TCP", ["R1"], 8, ["terminal_supply_area", "assembly_fixture"]),
             (ProcessType.TRANSFER_TO_INSPECTION, "transfer_area", "R3_PRODUCT_PLACE_INSPECTION_TCP", ["R3"], 9, ["assembly_fixture", "inspection_platform_area"]),
             (ProcessType.INSPECT, "camera_area", "CAMERA_INSPECTION_CENTER", ["CAMERA"], 6, ["inspection_platform_area", "camera_area"]),
-            (ProcessType.SCREW, "inspection_screw_area", "R4_SCREW_PRESS", ["R4"], 11, ["inspection_screw_area", "inspection_platform_area"]),
         ],
     },
     "C": {
@@ -38,13 +36,13 @@ _PRODUCT_PROCESSES = {
             (ProcessType.TERMINAL_INSTALL, "terminal_supply_area", "R1_TERMINAL_PLACE_TCP", ["R1"], 10, ["terminal_supply_area", "assembly_fixture"]),
             (ProcessType.TRANSFER_TO_INSPECTION, "transfer_area", "R3_PRODUCT_PLACE_INSPECTION_TCP", ["R3"], 10, ["assembly_fixture", "inspection_platform_area"]),
             (ProcessType.INSPECT, "camera_area", "CAMERA_INSPECTION_CENTER", ["CAMERA"], 7, ["inspection_platform_area", "camera_area"]),
-            (ProcessType.SCREW, "inspection_screw_area", "R4_SCREW_PRESS", ["R4"], 13, ["inspection_screw_area", "inspection_platform_area"]),
         ],
     },
 }
 
-# 检测结果先记录，R4 锁付完成后由 R5 分拣（根据检测结果）
-_SORT_PROCESSES = {
+# 检测结果分支：OK 先由 R4 锁付再 R5 分拣；NG 直接由 R5 分拣。
+_POST_INSPECTION_PROCESSES = {
+    ProcessType.SCREW: ("inspection_screw_area", "R4_SCREW_PRESS", ["R4"], 9, ["inspection_screw_area", "inspection_platform_area"]),
     ProcessType.SORT_GOOD: ("good_conveyor_area", "R5_GOOD_PLACE_TCP", ["R5"], 5, ["inspection_platform_area", "good_conveyor_area"]),
     ProcessType.SORT_DEFECT: ("defect_conveyor_area", "R5_DEFECT_PLACE_TCP", ["R5"], 5, ["inspection_platform_area", "defect_conveyor_area"]),
 }
@@ -180,24 +178,45 @@ class MockScheduler(IScheduler):
 
         if (
             completed_task
-            and completed_task.process == ProcessType.SCREW.value
+            and completed_task.process == ProcessType.INSPECT.value
             and result.status == TaskStatus.FINISHED.value
         ):
-            quality_result = self._quality_by_order.get(completed_task.order_id, "")
+            quality_result = result.quality_result
             if quality_result not in ("OK", "NG"):
                 self._notify()
                 return tasks
             process = (
-                ProcessType.SORT_GOOD
+                ProcessType.SCREW
                 if quality_result == "OK"
                 else ProcessType.SORT_DEFECT
             )
-            area, point, available_robots, duration, required_areas = _SORT_PROCESSES[process]
+            area, point, available_robots, duration, required_areas = _POST_INSPECTION_PROCESSES[process]
             tasks.append(Task(
                 task_id=self._next_task_id(),
                 order_id=completed_task.order_id,
                 product_type=completed_task.product_type,
                 process=process.value,
+                target_area=area,
+                target_point=point,
+                available_robots=list(available_robots),
+                duration=duration,
+                predecessors=[completed_task.task_id],
+                priority=completed_task.priority,
+                status=TaskStatus.PENDING.value,
+                required_areas=list(required_areas),
+            ))
+        elif (
+            completed_task
+            and completed_task.process == ProcessType.SCREW.value
+            and result.status == TaskStatus.FINISHED.value
+            and self._quality_by_order.get(completed_task.order_id) == "OK"
+        ):
+            area, point, available_robots, duration, required_areas = _POST_INSPECTION_PROCESSES[ProcessType.SORT_GOOD]
+            tasks.append(Task(
+                task_id=self._next_task_id(),
+                order_id=completed_task.order_id,
+                product_type=completed_task.product_type,
+                process=ProcessType.SORT_GOOD.value,
                 target_area=area,
                 target_point=point,
                 available_robots=list(available_robots),

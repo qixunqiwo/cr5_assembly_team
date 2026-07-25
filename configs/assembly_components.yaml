@@ -77,7 +77,7 @@ components:
     install_level: 6
     granularity: "main_component"
     dependencies: [control_module_body]
-    description: "R1 将端子排安装到箱体内，是后续锁付动作的对象。"
+    description: "R1 将端子排安装到箱体内，是后续相机检测和质量判定的对象。"
 
   terminal_slots:
     name: "端子排接线槽"
@@ -95,9 +95,9 @@ components:
     install_process: terminal_install
     install_robot: R1
     install_level: 8
-    granularity: "fastening_target"
+    granularity: "inspection_feature"
     dependencies: [terminal_block_body]
-    description: "端子排自带的锁付目标，随端子排安装进入产品，R4 在后续锁付工序中作用于该目标。"
+    description: "端子排细节特征，随端子排安装进入产品，用于后续视觉检测和质量判定。"
 
 operations:
   transfer_to_inspection:
@@ -113,7 +113,7 @@ operations:
     dependencies: [transfer_to_inspection]
 
   screw:
-    name: "端子螺钉锁付"
+    name: "端子螺钉锁付（仅 OK 产品）"
     robot: R4
     level: 11
     dependencies: [inspect]
@@ -127,8 +127,8 @@ operations:
   sort_defect:
     name: "缺陷品分拣"
     robot: R5
-    level: 12
-    dependencies: [screw]
+    level: 11
+    dependencies: [inspect]
 
 worksteps:
   box_feed:
@@ -237,7 +237,7 @@ worksteps:
       point: R4_SCREW_TCP
       ratio: 0.25
     - code: screw_press
-      label: "R4 下压并完成锁付"
+      label: "R4 下压并完成 OK 产品锁付"
       point: R4_SCREW_PRESS
       ratio: 0.50
 

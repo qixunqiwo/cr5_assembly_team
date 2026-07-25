@@ -44,7 +44,11 @@ class TaskGenerator:
         source_task: Task,
         quality_result: str,
     ) -> Optional[Task]:
-        process_name = "sort_good" if quality_result == "OK" else "sort_defect" if quality_result == "NG" else ""
+        process_name = ""
+        if source_task.process == "inspect":
+            process_name = "screw" if quality_result == "OK" else "sort_defect" if quality_result == "NG" else ""
+        elif source_task.process == "screw" and quality_result == "OK":
+            process_name = "sort_good"
         if not process_name:
             return None
 
@@ -98,7 +102,12 @@ class TaskGenerator:
             target_area=step["area"],
             target_point=step["point"],
             available_robots=list(step.get("available_robots", [])),
-            duration=float(step.get("duration", 5.0)),
+            duration=float(
+                step.get("duration_by_product", {}).get(
+                    product_type,
+                    step.get("duration", 5.0),
+                )
+            ),
             predecessors=[predecessor] if predecessor else [],
             priority=priority,
             status=TaskStatus.PENDING.value if not predecessor else TaskStatus.WAITING.value,
@@ -123,32 +132,54 @@ class TaskGenerator:
         due_weight = float(cfg.get("due_weight", 0.30))
         waiting_weight = float(cfg.get("waiting_weight", 0.15))
         critical_path_weight = float(cfg.get("critical_path_weight", 0.10))
+        lateness_risk_weight = float(cfg.get("lateness_risk_weight", 0.0))
         bottleneck_penalty_weight = float(cfg.get("bottleneck_penalty_weight", 0.0))
         area_conflict_penalty_weight = float(cfg.get("area_conflict_penalty_weight", 0.0))
+        post_inspection_clearance_bonus = float(cfg.get("post_inspection_clearance_bonus", 0.0))
+        screw_clearance_bonus = float(cfg.get("screw_clearance_bonus", 0.0))
+        sort_clearance_bonus = float(cfg.get("sort_clearance_bonus", 0.0))
+        overdue_boost = float(cfg.get("overdue_boost", 0.0))
+        urgent_due_boost = float(cfg.get("urgent_due_boost", 0.0))
         urgent_threshold = int(cfg.get("urgent_threshold", 5))
         bottleneck_resources = set(cfg.get("bottleneck_resources", []))
         conflict_sensitive_areas = set(cfg.get("conflict_sensitive_areas", []))
         aging_horizon = max(float(cfg.get("aging_horizon", 30.0)), 1.0)
+        waiting_aging_shape = max(float(cfg.get("waiting_aging_shape", 1.0)), 0.1)
         urgency_horizon = max(float(cfg.get("urgency_horizon", 60.0)), 1.0)
         critical_horizon = max(float(cfg.get("critical_horizon", 60.0)), 1.0)
 
         priority = min(max(float(task.priority), 0.0) / 10.0, 1.0)
         waiting = min(max(current_time - ready_time, 0.0) / aging_horizon, 1.0)
+        waiting = waiting ** (1.0 / waiting_aging_shape)
         remaining = max(float(remaining_work if remaining_work is not None else task.duration), 0.0)
         criticality = min(remaining / critical_horizon, 1.0)
 
         due_time = self.task_due_times.get(task.task_id, 0.0)
         urgency = 0.0
+        lateness_risk = 0.0
+        slack = None
         if due_time > 0:
             slack = due_time - current_time - remaining
             urgency = 1.0 if slack <= 0 else 1.0 / (1.0 + slack / urgency_horizon)
+            lateness_risk = min(max(-slack, 0.0) / urgency_horizon, 2.0)
 
         score = (
             priority_weight * priority
             + due_weight * urgency
             + waiting_weight * waiting
             + critical_path_weight * criticality
+            + lateness_risk_weight * lateness_risk
         )
+        if slack is not None and slack <= 0:
+            score += overdue_boost
+        if task.priority >= urgent_threshold and (slack is None or slack <= urgency_horizon):
+            score += urgent_due_boost
+        if task.process in ("screw", "sort_good", "sort_defect"):
+            score += post_inspection_clearance_bonus
+        if task.process == "screw":
+            score += screw_clearance_bonus
+        if task.process in ("sort_good", "sort_defect"):
+            score += sort_clearance_bonus
         if task.priority < urgent_threshold:
             if bottleneck_resources.intersection(task.available_robots):
                 score -= bottleneck_penalty_weight
