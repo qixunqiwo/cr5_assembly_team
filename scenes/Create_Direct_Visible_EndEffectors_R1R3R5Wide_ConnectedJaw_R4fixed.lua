@@ -233,8 +233,8 @@ local function createGripper(toolName,robotName,tipName,scale,gripMode)
     -- 之前只是把左右 finger_link 拉宽，但前端黑色夹指长度不够，
     -- 视觉上就像“夹爪断开”。这里把夹指做成连续一体式长夹指，
     -- 并增加横向导轨和滑块，让张开时也能看出是一个完整机构。
-    local bodyY = isWide and 0.205 or (0.080*scale)
-    local railY = isWide and 0.205 or (0.018*scale)
+    local bodyY = isWide and 0.075 or (0.080*scale)
+    local railY = isWide and 0.180 or (0.018*scale)
     local baseY = isWide and 0.085 or (0.038*scale)
 
     cyl(root,toolName..'_rear_flange',0.045*scale,0.035*scale,{0.000,0,0},{0,math.rad(90),0},COL_METAL)
@@ -250,7 +250,7 @@ local function createGripper(toolName,robotName,tipName,scale,gripMode)
         cyl(root,toolName..'_wide_guide_top',0.0060,0.200,{-0.185*scale,0,0.046*scale},{math.rad(90),0,0},COL_DARK)
         cyl(root,toolName..'_wide_guide_bottom',0.0060,0.200,{-0.185*scale,0,-0.046*scale},{math.rad(90),0,0},COL_DARK)
         -- 中间固定背板，说明两侧手指属于同一个夹爪机构
-        box(root,toolName..'_wide_back_bridge',{0.040*scale,0.205,0.065*scale},{-0.205*scale,0,0},COL_METAL)
+        box(root,toolName..'_wide_back_bridge',{0.040*scale,0.075,0.065*scale},{-0.205*scale,0,0},COL_METAL)
     else
         cyl(root,toolName..'_side_pneumatic_A',0.010*scale,0.045*scale,{-0.090*scale,0.055*scale,0.025*scale},{math.rad(90),0,0},COL_DARK)
         cyl(root,toolName..'_side_pneumatic_B',0.010*scale,0.045*scale,{-0.090*scale,0.055*scale,-0.025*scale},{math.rad(90),0,0},COL_DARK)
@@ -268,14 +268,14 @@ local function createGripper(toolName,robotName,tipName,scale,gripMode)
             box(parent,prefix..'_carriage',{0.052*scale,0.030*scale,0.080*scale},{-0.205*scale,y,0},COL_METAL)
 
             -- 连续上/下长夹指，长度加长，和前端夹持垫重叠
-            box(parent,prefix..'_upper_integrated_finger',{0.175,0.022*scale,0.020*scale},{-0.275,y,0.034*scale},COL_FINGER)
-            box(parent,prefix..'_lower_integrated_finger',{0.175,0.022*scale,0.020*scale},{-0.275,y,-0.034*scale},COL_FINGER)
+            box(parent,prefix..'_upper_integrated_finger',{0.175*scale,0.022*scale,0.020*scale},{-0.275*scale,y,0.034*scale},COL_FINGER)
+            box(parent,prefix..'_lower_integrated_finger',{0.175*scale,0.022*scale,0.020*scale},{-0.275*scale,y,-0.034*scale},COL_FINGER)
 
             -- 前端竖直夹持块，和上下长夹指重叠连接
-            box(parent,prefix..'_front_vertical_jaw',{0.040,0.026*scale,0.095*scale},{-0.350,y,0},COL_FINGER)
+            box(parent,prefix..'_front_vertical_jaw',{0.040,0.026*scale,0.095*scale},{-0.350*scale,y,0},COL_FINGER)
 
             -- 夹持橡胶垫，贴在内侧
-            box(parent,prefix..'_inner_rubber_pad',{0.018,0.030*scale,0.075*scale},{-0.368,y,0},COL_RUBBER)
+            box(parent,prefix..'_inner_rubber_pad',{0.018,0.030*scale,0.075*scale},{-0.368*scale,y,0},COL_RUBBER)
 
             -- 小螺钉装饰
             cyl(parent,prefix..'_screw_1',0.006*scale,0.024*scale,{-0.205*scale,y+sgn*0.014*scale,0.022*scale},{math.rad(90),0,0},COL_METAL)
@@ -296,7 +296,7 @@ local function createGripper(toolName,robotName,tipName,scale,gripMode)
     buildFinger(left,toolName..'_left',1)
     buildFinger(right,toolName..'_right',-1)
 
-    local tcpX = isWide and -0.370 or (-0.355*scale)
+    local tcpX = isWide and (-0.370*scale) or (-0.355*scale)
     local tcp=dummy(root,toolName..'_tool_tcp',{tcpX,0,0})
     sphere(tcp,toolName..'_tcp_marker',0.010*scale,{0,0,0},COL_TCP)
 
@@ -367,11 +367,11 @@ end
 function sysCall_init()
     print('===== Create direct visible end-effectors R1-R5 =====')
 
-    createGripper('R1T','R1','R1_gripper_tip',0.88,'wide')
+    createGripper('R1T','R1','R1_gripper_tip',0.70,'wide')
     createSuction('R2T','R2','R2_vacuum_tip')
-    createGripper('R3T','R3','R3_gripper_tip',0.88,'wide')
+    createGripper('R3T','R3','R3_gripper_tip',0.70,'wide')
     createScrewdriver('R4T','R4','R4_tool_tip')
-    createGripper('R5T','R5','R5_gripper_tip',0.88,'wide')
+    createGripper('R5T','R5','R5_gripper_tip',0.70,'wide')
 
     print('===== Done. Disable this script after success. =====')
     if MOUNT_TO_ROBOTS then
