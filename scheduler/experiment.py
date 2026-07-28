@@ -39,6 +39,10 @@ class ExperimentResult:
     parallel_efficiency: float
     weighted_tardiness: float
     conflict_count: int
+    inspection_platform_avg_residency_time: float
+    inspection_platform_max_residency_time: float
+    post_inspection_avg_clearance_wait: float
+    post_inspection_max_clearance_wait: float
     robot_utilization: Dict[str, float]
     order_completion_times: Dict[str, float]
     robot_idle_time: Dict[str, float]
@@ -55,6 +59,10 @@ class ExperimentResult:
             "parallel_efficiency": self.parallel_efficiency,
             "weighted_tardiness": self.weighted_tardiness,
             "conflict_count": self.conflict_count,
+            "inspection_platform_avg_residency_time": self.inspection_platform_avg_residency_time,
+            "inspection_platform_max_residency_time": self.inspection_platform_max_residency_time,
+            "post_inspection_avg_clearance_wait": self.post_inspection_avg_clearance_wait,
+            "post_inspection_max_clearance_wait": self.post_inspection_max_clearance_wait,
             "robot_utilization": self.robot_utilization,
             "order_completion_times": self.order_completion_times,
             "robot_idle_time": self.robot_idle_time,
@@ -71,7 +79,7 @@ class DiscreteEventExperiment:
         self.scheduler_config = load_yaml(root / "configs" / "scheduler.yaml").get("scheduler", {})
         self.urgent_threshold = int(self.scheduler_config.get("urgent_threshold", 5))
         self.scoring_config = self.scheduler_config.get("scoring", {})
-        self.sort_trigger_process = str(self.scheduler_config.get("sort_trigger_process", "inspect"))
+        self.sort_trigger_process = str(self.scheduler_config.get("sort_trigger_process", "branch_by_quality"))
 
     def run_baseline(self, orders: List[Order]) -> ExperimentResult:
         """固定订单顺序：一个订单完整做完，再做下一个订单。"""
@@ -136,6 +144,7 @@ class DiscreteEventExperiment:
         robot_available = self._empty_busy_time()
         busy_time = self._empty_busy_time()
         area_locks: Dict[str, Set[str]] = {}
+        station_owners: Dict[str, str] = {}
         robot_reservations: Dict[str, float] = {}
         records: List[ScheduleRecord] = []
         conflict_count = 0
@@ -157,6 +166,7 @@ class DiscreteEventExperiment:
                     and not any(item[1].task_id == task.task_id for item in running)
                     and generator.task_arrival_times.get(task.task_id, 0.0) <= current_time
                     and self._predecessors_done(task, finished)
+                    and self._station_flow_allows(task, station_owners)
                     and any(robot in idle_robots for robot in task.available_robots)
                 ]
                 if use_scoring:
@@ -193,6 +203,7 @@ class DiscreteEventExperiment:
                     busy_time[robot_id] += task.duration
                     robot_available[robot_id] = end
                     running.append((end, task, robot_id))
+                    self._claim_station_for_task(task, station_owners)
                     idle_robots.remove(robot_id)
                     if use_scoring and task.priority >= self.urgent_threshold:
                         self._reserve_successor_robots(
@@ -221,6 +232,7 @@ class DiscreteEventExperiment:
             for _, task, _ in completed_now:
                 finished.add(task.task_id)
                 self._release_area(task, area_locks)
+                self._release_station_after_task(task, station_owners)
                 post_task = self._build_sort_task_if_ready(generator, task, quality_by_order)
                 if post_task:
                     task_map[post_task.task_id] = post_task
@@ -256,6 +268,7 @@ class DiscreteEventExperiment:
         robot_available = self._empty_busy_time()
         busy_time = self._empty_busy_time()
         area_locks: Dict[str, Set[str]] = {}
+        station_owners: Dict[str, str] = {}
         records: List[ScheduleRecord] = []
         conflict_count = 0
         current_time = 0.0
@@ -272,6 +285,7 @@ class DiscreteEventExperiment:
                     records,
                     busy_time,
                     area_locks,
+                    station_owners,
                     ready_time,
                 )
                 robot_available[fault_robot] = fault_end
@@ -293,6 +307,7 @@ class DiscreteEventExperiment:
                     and not any(item[1].task_id == task.task_id for item in running)
                     and generator.task_arrival_times.get(task.task_id, 0.0) <= current_time
                     and self._predecessors_done(task, finished)
+                    and self._station_flow_allows(task, station_owners)
                     and any(robot in idle_robots for robot in task.available_robots)
                 ]
                 if use_scoring:
@@ -324,6 +339,7 @@ class DiscreteEventExperiment:
                     busy_time[robot_id] += task.duration
                     robot_available[robot_id] = end
                     running.append((end, task, robot_id))
+                    self._claim_station_for_task(task, station_owners)
                     idle_robots.remove(robot_id)
                     assigned = True
 
@@ -354,6 +370,7 @@ class DiscreteEventExperiment:
             for _, task, _ in completed_now:
                 finished.add(task.task_id)
                 self._release_area(task, area_locks)
+                self._release_station_after_task(task, station_owners)
                 post_task = self._build_sort_task_if_ready(generator, task, quality_by_order)
                 if post_task:
                     task_map[post_task.task_id] = post_task
@@ -487,6 +504,12 @@ class DiscreteEventExperiment:
             robot_id: max(makespan - time_used, 0.0)
             for robot_id, time_used in busy_time.items()
         }
+        (
+            platform_avg_residency,
+            platform_max_residency,
+            post_inspection_avg_wait,
+            post_inspection_max_wait,
+        ) = self._inspection_platform_metrics(records)
         return ExperimentResult(
             mode=mode,
             makespan=makespan,
@@ -497,11 +520,49 @@ class DiscreteEventExperiment:
             parallel_efficiency=(total_work / (makespan * len(busy_time)) if makespan else 0.0),
             weighted_tardiness=weighted_tardiness,
             conflict_count=conflict_count,
+            inspection_platform_avg_residency_time=platform_avg_residency,
+            inspection_platform_max_residency_time=platform_max_residency,
+            post_inspection_avg_clearance_wait=post_inspection_avg_wait,
+            post_inspection_max_clearance_wait=post_inspection_max_wait,
             robot_utilization=utilization,
             order_completion_times=order_completion,
             robot_idle_time=idle_time,
             records=records,
         )
+
+    def _inspection_platform_metrics(
+        self,
+        records: List[ScheduleRecord],
+    ) -> Tuple[float, float, float, float]:
+        grouped: Dict[str, List[ScheduleRecord]] = {}
+        for record in records:
+            grouped.setdefault(record.order_id, []).append(record)
+
+        residencies: List[float] = []
+        clearance_waits: List[float] = []
+        for order_records in grouped.values():
+            by_process = {record.process: record for record in order_records}
+            transfer = by_process.get("transfer_to_inspection")
+            inspect = by_process.get("inspect")
+            sort_task = by_process.get("sort_good") or by_process.get("sort_defect")
+            if transfer and sort_task:
+                residencies.append(max(sort_task.end_time - transfer.start_time, 0.0))
+            if not inspect:
+                continue
+            if "sort_defect" in by_process:
+                clearance_waits.append(max(by_process["sort_defect"].start_time - inspect.end_time, 0.0))
+            elif "screw" in by_process and "sort_good" in by_process:
+                screw = by_process["screw"]
+                sort_good = by_process["sort_good"]
+                wait_after_inspect = max(screw.start_time - inspect.end_time, 0.0)
+                wait_after_screw = max(sort_good.start_time - screw.end_time, 0.0)
+                clearance_waits.append(wait_after_inspect + wait_after_screw)
+
+        avg_residency = sum(residencies) / len(residencies) if residencies else 0.0
+        max_residency = max(residencies, default=0.0)
+        avg_clearance_wait = sum(clearance_waits) / len(clearance_waits) if clearance_waits else 0.0
+        max_clearance_wait = max(clearance_waits, default=0.0)
+        return avg_residency, max_residency, avg_clearance_wait, max_clearance_wait
 
     def _record(
         self,
@@ -535,7 +596,7 @@ class DiscreteEventExperiment:
     ) -> Optional[Task]:
         if task.process == "inspect":
             quality_by_order[task.order_id] = self._quality_for(task)
-        if task.process != self.sort_trigger_process:
+        if task.process not in ("inspect", "screw"):
             return None
         return generator.build_post_inspection_task(
             task,
@@ -615,6 +676,7 @@ class DiscreteEventExperiment:
         records: List[ScheduleRecord],
         busy_time: Dict[str, float],
         area_locks: Dict[str, Set[str]],
+        station_owners: Dict[str, str],
         ready_time: Dict[str, float],
     ) -> List[Tuple[float, Task, str]]:
         remaining = []
@@ -630,6 +692,7 @@ class DiscreteEventExperiment:
                     break
             ready_time[task.task_id] = fault_start
             self._release_area(task, area_locks)
+            self._release_station_on_interruption(task, station_owners)
         return remaining
 
     def _predecessors_done(self, task: Task, finished: Set[str]) -> bool:
@@ -674,6 +737,43 @@ class DiscreteEventExperiment:
             owners.discard(task.task_id)
             if not owners:
                 del area_locks[area]
+
+    def _station_flow_allows(self, task: Task, station_owners: Dict[str, str]) -> bool:
+        assembly_owner = station_owners.get("assembly_fixture")
+        if "assembly_fixture" in self._task_lock_areas(task):
+            if assembly_owner and assembly_owner != task.order_id:
+                return False
+            if not assembly_owner and task.process != "box_feed":
+                return False
+
+        inspection_owner = station_owners.get("inspection_platform_area")
+        if "inspection_platform_area" in self._task_lock_areas(task):
+            if inspection_owner and inspection_owner != task.order_id:
+                return False
+            if not inspection_owner and task.process != "transfer_to_inspection":
+                return False
+        return True
+
+    def _claim_station_for_task(self, task: Task, station_owners: Dict[str, str]) -> None:
+        if task.process == "box_feed":
+            station_owners.setdefault("assembly_fixture", task.order_id)
+        elif task.process == "transfer_to_inspection":
+            station_owners.setdefault("inspection_platform_area", task.order_id)
+
+    def _release_station_after_task(self, task: Task, station_owners: Dict[str, str]) -> None:
+        if task.process == "transfer_to_inspection":
+            if station_owners.get("assembly_fixture") == task.order_id:
+                del station_owners["assembly_fixture"]
+        elif task.process in ("sort_good", "sort_defect"):
+            if station_owners.get("inspection_platform_area") == task.order_id:
+                del station_owners["inspection_platform_area"]
+
+    def _release_station_on_interruption(self, task: Task, station_owners: Dict[str, str]) -> None:
+        if task.process == "box_feed" and station_owners.get("assembly_fixture") == task.order_id:
+            del station_owners["assembly_fixture"]
+        elif task.process == "transfer_to_inspection":
+            if station_owners.get("inspection_platform_area") == task.order_id:
+                del station_owners["inspection_platform_area"]
 
     def _task_lock_areas(self, task: Task) -> List[str]:
         return task.required_areas or [task.target_area]

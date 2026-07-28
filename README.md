@@ -193,6 +193,6 @@ cd /opt/CoppeliaSim_Edu_V4_10_0_rev0_Ubuntu22_04
 
 ## 7. 仓库说明
 
-仓库中 `github_upload_ready_4_scheduler_20260719/` 是阶段性交付副本，正式开发应优先修改仓库根目录下的同名模块，避免两套代码继续分叉。
+动态调度测试相关说明集中放在 `scheduling_algorithm_test/`；正式开发仍以仓库根目录下的同名模块为准，避免维护多套副本。
 
 ROS2 的 `build/`、`install/`、`log/`，以及 Python 缓存、IDE 临时文件不应提交。
