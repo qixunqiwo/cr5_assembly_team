@@ -1,6 +1,7 @@
 """Shared data types for the five-CR5A scheduling system."""
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, List, Optional
 
 

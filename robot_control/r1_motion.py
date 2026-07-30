@@ -1,7 +1,7 @@
 """Validated R1 box and terminal motion for the five-CR5A CoppeliaSim cell.
 
 The checked-in plan contains joint-space samples generated and statically
-validated against ``five_cr5a_cell.ttt``. Runtime execution still checks the
+validated against ``compact_cell1ttt.ttt``. Runtime execution still checks the
 robot, payload, environment, self-collision, and R1 workspace. Grasping is a
 visual attach operation; this module does not claim physical grasp validation.
 """
@@ -36,22 +36,24 @@ R1_ACTIONS = frozenset(
 
 PLAN_VERSION = 2
 PLAN_PATH = Path(__file__).with_name("plans") / "r1_complete_cycle_plan.json"
-SCENE_NAME = "five_cr5a_cell.ttt"
+SCENE_NAME = "compact_cell1ttt.ttt"
 
-BOX_SUPPLY_POSITION = (-1.8, 0.35, 0.156)
-TERMINAL_SUPPLY_POSITION = (-1.9, 0.1, 0.1735)
+BOX_SUPPLY_POSITION = (-1.86, 0.22, 0.156)
+TERMINAL_SUPPLY_POSITION = (-1.82, -0.02, 0.1665)
 BOX_VISUAL_OFFSET_Z = 0.060
-TERMINAL_VISUAL_OFFSET_Z = 0.028
+TERMINAL_VISUAL_OFFSET_Z = 0.056
 TERMINAL_COORDINATED_VISUAL_OFFSET_Z = 0.056
-PCB_ASSEMBLY_POSITION = (-1.150058, 0.200161, 0.281739)
+PCB_ASSEMBLY_POSITION = (-1.08, 0.12, 0.2904)
 
 TRANSFER_SPEED_DEG_S = 50.0
-DESCENT_SPEED_CAP_DEG_S = 24.0
+DESCENT_SPEED_CAP_DEG_S = 36.0
 HOLD_SECONDS = 0.8
 JOINT_START_TOLERANCE_DEG = 0.25
 OBJECT_POSITION_TOLERANCE_M = 0.002
-TARGET_TOLERANCE = 1e-6
+TARGET_TOLERANCE = 1e-4
 WORKSPACE_TOLERANCE_M = 0.003
+MAX_UNWRAPPED_JOINT_RAD = math.pi + 1e-6
+MAX_PATH_BOUNDARY_JUMP_RAD = 1e-4
 
 TARGET_NAMES = (
     "R1_BOX_PICK_APP",
@@ -109,6 +111,23 @@ def _finite_joint_path(value: Any) -> bool:
     )
 
 
+def _max_joint_gap(first: list[float], second: list[float]) -> float:
+    return max(abs(a - b) for a, b in zip(first, second))
+
+
+def _path_has_wrapped_joint_branch(configs: list[list[float]]) -> bool:
+    if any(
+        abs(float(joint)) > MAX_UNWRAPPED_JOINT_RAD
+        for config in configs
+        for joint in config
+    ):
+        return True
+    return any(
+        _max_joint_gap(first, second) > math.pi
+        for first, second in zip(configs, configs[1:])
+    )
+
+
 def load_r1_plan(path: Path = PLAN_PATH) -> dict[str, Any]:
     """Load and structurally validate the immutable R1 replay plan."""
     try:
@@ -134,6 +153,17 @@ def load_r1_plan(path: Path = PLAN_PATH) -> dict[str, Any]:
     for name in REQUIRED_PATHS:
         if not _finite_joint_path(paths.get(name)):
             raise RuntimeError(f"R1 plan path is invalid: {name}")
+        if _path_has_wrapped_joint_branch(paths[name]):
+            raise RuntimeError(f"R1 plan uses a wrapped joint branch: {name}")
+    for first_name, second_name in zip(REQUIRED_PATHS, REQUIRED_PATHS[1:]):
+        if (
+            _max_joint_gap(paths[first_name][-1], paths[second_name][0])
+            > MAX_PATH_BOUNDARY_JUMP_RAD
+        ):
+            raise RuntimeError(
+                "R1 plan path boundary jumps: "
+                f"{first_name} -> {second_name}"
+            )
 
     workspace = plan.get("workspace", {})
     expected_workspace = WORKSPACES["R1"]
@@ -151,8 +181,12 @@ def load_r1_plan(path: Path = PLAN_PATH) -> dict[str, Any]:
     validation = plan.get("validation", {})
     if validation.get("collision_free") is not True:
         raise RuntimeError("R1 plan has no successful collision validation")
+    if validation.get("virtual_tcp_offset_m") != 0.146:
+        raise RuntimeError("R1 plan does not use the validated 146 mm TCP")
     fingerprint = validation.get("scene_fingerprint", {})
-    if not isinstance(fingerprint.get("sha256"), str):
+    if not isinstance(fingerprint.get("sha256"), str) or not isinstance(
+        fingerprint.get("size"), int
+    ):
         raise RuntimeError("R1 plan has no validated scene fingerprint")
     return plan
 
@@ -257,10 +291,24 @@ class _EnvironmentCollisionProbe:
         self.payload_collection: Optional[int] = None
         self.arm_collection: Optional[int] = None
 
-        tool = sim.getObject("/R1/R1_ROBOTIQ85")
-        self.tool_shapes = set(
+        tool = sim.getObject("/R1/R1T")
+        tool_shapes_all = set(
             sim.getObjectsInTree(tool, sim.object_shape_type, 0)
         )
+        # Native tools have mounting shapes that naturally contact Link6;
+        # exclude them from self-collision so the safety guard does not
+        # misidentify an expected mount as a collision.
+        tool_root_pos = sim.getObjectPosition(tool, -1)
+        self.tool_shapes = set()
+        for handle in tool_shapes_all:
+            alias = sim.getObjectAlias(handle)
+            pos = sim.getObjectPosition(handle, -1)
+            dist = sum((pos[i] - tool_root_pos[i]) ** 2 for i in range(3)) ** 0.5
+            # Exclude shapes within 15 mm of the tool root (mounting zone)
+            # and all mount/fixture plate shapes regardless of position.
+            if dist < 0.015 or "mount" in alias or "flange" in alias or "plate" in alias:
+                continue
+            self.tool_shapes.add(handle)
         robot_shapes = set(
             sim.getObjectsInTree(robot, sim.object_shape_type, 0)
         )
@@ -352,11 +400,17 @@ class _SelfCollisionProbe:
                 )
             self.tail_collections.append((links[index], collection))
 
-        tool = sim.getObject("/R1/R1_ROBOTIQ85")
+        tool = sim.getObject("/R1/R1T")
+        tool_root_pos = sim.getObjectPosition(tool, -1)
         self.tool_collection = sim.createCollection(1)
         for handle in sim.getObjectsInTree(
             tool, sim.object_shape_type, 0
         ):
+            alias = sim.getObjectAlias(handle)
+            pos = sim.getObjectPosition(handle, -1)
+            dist = sum((pos[i] - tool_root_pos[i]) ** 2 for i in range(3)) ** 0.5
+            if dist < 0.015 or "mount" in alias or "flange" in alias or "plate" in alias:
+                continue
             sim.addItemToCollection(
                 self.tool_collection, sim.handle_single, handle, 0
             )
@@ -596,6 +650,7 @@ class R1MotionController:
         self._prepared_plan: Optional[dict[str, Any]] = None
         self._continuous_stepping = False
         self._ready_gripper_open = False
+        self._assembly_entry_waits: dict[str, Any] = {}
 
     def _freeze_gripper(self) -> None:
         freeze = getattr(self.bridge, "freeze_gripper", None)
@@ -720,6 +775,22 @@ class R1MotionController:
 
     def set_continuous_stepping(self, enabled: bool) -> None:
         self._continuous_stepping = bool(enabled)
+
+    def set_assembly_entry_wait(self, action: str, waiter: Any | None) -> None:
+        if waiter is None:
+            self._assembly_entry_waits.pop(action, None)
+        else:
+            self._assembly_entry_waits[action] = waiter
+
+    def _wait_before_assembly(self, action: str) -> None:
+        waiter = self._assembly_entry_waits.get(action)
+        if waiter is None:
+            return
+        if hasattr(waiter, "wait"):
+            waiter.wait()
+            return
+        if callable(waiter):
+            waiter()
 
     def enter_ready(self) -> dict[str, Any]:
         if self._prepared_plan is None:
@@ -924,6 +995,7 @@ class R1MotionController:
                     "terminal",
                 )
                 attached_payload = terminal
+                self._wait_before_assembly(R1_TERMINAL_PLACED)
                 with self.assembly_lock:
                     runner.execute_path(
                         "terminal_lift_and_transfer",

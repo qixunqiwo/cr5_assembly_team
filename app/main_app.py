@@ -142,6 +142,7 @@ class Cr5AssemblyApp:
         self._real_ready = False
         self._real_ready_evidence = None
         self._real_ready_error = ""
+        self._real_front_half_done = False
         self.product_buttons = {}
 
         self.scheduler.set_state_change_callback(self._on_state_change)
@@ -769,6 +770,7 @@ class Cr5AssemblyApp:
         self.paused = False
         self._stop_event.clear()
         self._dispatched_task_ids.clear()
+        self._real_front_half_done = False
         if self.runtime_mode == "REAL":
             self._real_cycle_consumed = True
         self.start_btn.configure(state=tk.DISABLED, text="●  RUNNING")
@@ -798,6 +800,83 @@ class Cr5AssemblyApp:
             self._ui_queue.put(("done", None))
 
     def _execution_loop_impl(self):
+        if self.runtime_mode == "REAL" and not self._real_front_half_done:
+            coordinated_front_half = getattr(
+                self.robot_executor, "execute_coordinated_front_half", None
+            )
+            if callable(coordinated_front_half):
+                order = self.orders[0] if self.orders else None
+                order_id = order.order_id if order is not None else "GUI-REAL"
+                quality = (
+                    "defect"
+                    if order is not None
+                    and str(order.expected_quality).upper() == "NG"
+                    else "good"
+                )
+                self._ui_queue.put(
+                    (
+                        "log",
+                        (
+                            "  R1/R2/R3 COORDINATED FRONT HALF START\n",
+                            "info",
+                        ),
+                    )
+                )
+                front = coordinated_front_half(
+                    quality=quality,
+                    order_id=order_id,
+                )
+                self._real_front_half_done = True
+                by_action = {task.target_point: task for task in self.tasks}
+                for record in front.get("tasks", []):
+                    action = record["task"]["target_point"]
+                    result = record["result"]
+                    if action in by_action:
+                        task = by_action[action]
+                        task.status = result["status"]
+                        task.duration = max(
+                            0.0,
+                            float(result["end_time"])
+                            - float(result["start_time"]),
+                        )
+                        outcome = (
+                            "DONE"
+                            if result["status"] == TaskStatus.FINISHED.value
+                            else "FAILED"
+                        )
+                        self._ui_queue.put(
+                            (
+                                "log",
+                                (
+                                    f"  {outcome} {task.task_id} "
+                                    f"[{result['robot_id']}] "
+                                    f"{task.duration:.1f}s\n",
+                                    "ok"
+                                    if outcome == "DONE"
+                                    else "error",
+                                ),
+                            )
+                        )
+                self._ui_queue.put(("refresh_tasks", None))
+                self._ui_queue.put(("refresh_robots", None))
+                if front.get("status") != "finished":
+                    for task in self.tasks:
+                        if task.status != TaskStatus.FINISHED.value:
+                            task.status = TaskStatus.FAILED.value
+                    self._ui_queue.put(
+                        (
+                            "log",
+                            (
+                                f"  COORDINATED FRONT HALF FAILED: "
+                                f"{front.get('errors', {})}\n",
+                                "error",
+                            ),
+                        )
+                    )
+                    self._ui_queue.put(("refresh_tasks", None))
+                    self._ui_queue.put(("done", None))
+                    return
+
         while not self._stop_event.is_set():
             if self.paused:
                 time.sleep(0.1)

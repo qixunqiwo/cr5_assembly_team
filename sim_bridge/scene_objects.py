@@ -18,15 +18,20 @@ ROBOT_BASES = {
     robot_id: f"{SCENE_ROOT}/RobotBases/{robot_id}_Base"
     for robot_id in ROBOT_IDS
 }
+SCENE_FILE = "compact_cell1ttt.ttt"
 ROBOT_TIPS = {
     "R1": "R1_gripper_tip",
-    "R2": "R2_gripper_tip",
+    "R2": "R2_vacuum_tip",
     "R3": "R3_gripper_tip",
     "R4": "R4_tool_tip",
     "R5": "R5_gripper_tip",
 }
 ROBOT_TOOL_ROOTS = {
-    "R1": "/R1/R1_ROBOTIQ85",
+    "R1": "/R1/R1T",
+    "R2": "/R2/R2T",
+    "R3": "/R3/R3T",
+    "R4": "/R4/R4T",
+    "R5": "/R5/R5T",
 }
 
 TARGET_GROUPS = {
@@ -160,7 +165,7 @@ PROCESS_COMMANDS = {
 # after their scene-specific calibration; they must not be guessed here.
 WORKSPACES = {
     "R1": {
-        "lower": (-2.25, -0.12, 0.04),
+        "lower": (-2.25, -0.20, 0.04),
         "upper": (-0.82, 1.18, 1.55),
     },
     "R1_PRIVATE_SUPPLY": {
@@ -169,7 +174,7 @@ WORKSPACES = {
         "lock_required": False,
     },
     "R2": {
-        "lower": (-1.90, -0.55, 0.04),
+        "lower": (-1.90, -0.80, 0.04),
         "upper": (-0.95, 0.38, 1.55),
     },
     "R2_PRIVATE_SUPPLY": {
@@ -179,7 +184,7 @@ WORKSPACES = {
     },
     "R3": {
         "lower": (-1.40, -0.38, 0.04),
-        "upper": (0.45, 0.72, 1.55),
+        "upper": (0.60, 0.72, 1.55),
     },
     "R3_PRIVATE_SUPPLY": {
         "lower": (-1.02, -0.20, 0.14),
@@ -188,11 +193,11 @@ WORKSPACES = {
     },
     "R4": {
         "lower": (-0.05, -0.20, 0.04),
-        "upper": (0.80, 0.65, 1.55),
+        "upper": (1.00, 0.72, 1.55),
     },
     "R5": {
         "lower": (-0.68, -1.48, 0.04),
-        "upper": (0.98, 0.48, 1.55),
+        "upper": (1.30, 0.48, 1.55),
     },
     "ASSEMBLY_SHARED": {
         "lower": (-1.43, -0.04, 0.20),

@@ -1,9 +1,8 @@
 """Validated visual R4 screw motion for the five-CR5A simulation cell.
 
-The saved scene does not contain a screwdriver model.  This controller creates
-a runtime-only 100 mm tool, keeps every Git APP/TCP/PRESS target unchanged,
-and uses the approved vertical ``(180, 0, -135)`` degree tool orientation.
-The action is a visual screw-driving milestone; physical torque is not claimed.
+The controller replays the RViz/MoveIt taught native-screwdriver trajectory
+without changing the Git APP/TCP/PRESS targets.  The action is a visual
+screw-driving milestone; physical torque is not claimed.
 """
 
 from __future__ import annotations
@@ -11,22 +10,25 @@ from __future__ import annotations
 import bisect
 import hashlib
 import itertools
+import json
 import math
 import threading
 from pathlib import Path
 from typing import Any, Optional
 
-from robot_control.r1_motion import PLAN_PATH as R1_PLAN_PATH
-from robot_control.r1_motion import load_r1_plan
 from sim_bridge.coppelia_client import SimBridge
-from sim_bridge.scene_objects import PARTS, ROBOT_BASES, WORKSPACES
+from sim_bridge.scene_objects import PARTS, ROBOT_BASES, ROBOT_TIPS, WORKSPACES
 
 
 R4_SCREW_DONE = "R4_SCREW_DONE"
+R4_WAIT_POINT = "R4_WAIT_POINT"
+R4_POST_SCREW_STANDBY = R4_WAIT_POINT
 R4_ACTIONS = frozenset({R4_SCREW_DONE})
 
+PLAN_VERSION = 1
+PLAN_PATH = Path(__file__).with_name("plans") / "r4_screw_cycle_plan.json"
 ROBOT_ID = "R4"
-SCENE_NAME = "five_cr5a_cell.ttt"
+SCENE_NAME = "compact_cell1ttt.ttt"
 TARGET_NAMES = (
     "R4_SCREW_APP",
     "R4_SCREW_TCP",
@@ -34,15 +36,15 @@ TARGET_NAMES = (
 )
 PROTECTED_TARGETS = {
     "R4_SCREW_APP": {
-        "position": [0.21, -0.02, 0.55],
+        "position": [0.37, 0.015, 0.499],
         "orientation_euler": [0.0, 0.0, 0.0],
     },
     "R4_SCREW_TCP": {
-        "position": [0.21, -0.02, 0.36],
+        "position": [0.37, 0.015, 0.339],
         "orientation_euler": [0.0, 0.0, 0.0],
     },
     "R4_SCREW_PRESS": {
-        "position": [0.21, -0.02, 0.33],
+        "position": [0.37, 0.015, 0.309],
         "orientation_euler": [0.0, 0.0, 0.0],
     },
 }
@@ -58,15 +60,27 @@ TOOL_SHAFT_DIAMETER_M = 0.008
 TOOL_ROTATION_TURNS = 2.0
 TOOL_ROTATION_SECONDS = 1.6
 
-INSPECTION_PRODUCT_POSITION = (0.15, 0.05, 0.216)
+INSPECTION_PRODUCT_POSITION = (0.35, 0.05, 0.216)
 POSITION_TOLERANCE_M = 0.002
 JOINT_TOLERANCE_DEG = 0.30
 TARGET_TOLERANCE = 1e-6
 WORKSPACE_TOLERANCE_M = 0.003
 
 TRANSFER_SPEED_DEG_S = 50.0
-DESCENT_SPEED_CAP_DEG_S = 24.0
+DESCENT_SPEED_CAP_DEG_S = 36.0
 HOLD_SECONDS = 0.8
+MAX_UNWRAPPED_JOINT_RAD = 2.0 * math.pi + 1e-6
+MAX_PATH_BOUNDARY_JUMP_RAD = math.radians(0.5)
+
+REQUIRED_PATHS = (
+    "home_to_wait",
+    "wait_to_app",
+    "initial_to_app",
+    "descend_to_tcp",
+    "press",
+    "retract_to_app",
+    "app_to_wait",
+)
 
 RUNTIME_PREFIX = "R4_Runtime_"
 RUNTIME_BRIDGE_ALIAS = f"{RUNTIME_PREFIX}Command_Bridge"
@@ -101,6 +115,123 @@ def _near(first: list[float], second: list[float], tolerance: float) -> bool:
     return len(first) == len(second) and max(
         abs(a - b) for a, b in zip(first, second)
     ) <= tolerance
+
+
+def _finite_joint_path(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) >= 2
+        and all(
+            isinstance(config, list)
+            and len(config) == 6
+            and all(math.isfinite(float(joint)) for joint in config)
+            for config in value
+        )
+    )
+
+
+def _max_joint_gap(first: list[float], second: list[float]) -> float:
+    return max(abs(a - b) for a, b in zip(first, second))
+
+
+def _path_has_invalid_joint_branch(configs: list[list[float]]) -> bool:
+    if any(
+        abs(float(joint)) > MAX_UNWRAPPED_JOINT_RAD
+        for config in configs
+        for joint in config
+    ):
+        return True
+    return any(
+        _max_joint_gap(first, second) > math.pi
+        for first, second in zip(configs, configs[1:])
+    )
+
+
+def load_r4_plan(path: Path = PLAN_PATH) -> dict[str, Any]:
+    """Load and structurally validate the R4 native-screwdriver replay plan."""
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot load R4 plan {path}: {exc}") from exc
+
+    if plan.get("plan_version") != PLAN_VERSION:
+        raise RuntimeError(f"unsupported R4 plan version in {path}")
+    if plan.get("robot_id") != ROBOT_ID:
+        raise RuntimeError("R4 plan robot_id does not match")
+    if plan.get("tool") != "native_screwdriver":
+        raise RuntimeError("R4 plan is not for the native screwdriver")
+    if plan.get("tip_link") != ROBOT_TIPS["R4"]:
+        raise RuntimeError("R4 plan does not use R4_tool_tip")
+    if plan.get("protected_targets_modified") is not False:
+        raise RuntimeError("R4 plan does not preserve the protected Git targets")
+
+    protected = plan.get("protected_targets")
+    if not isinstance(protected, dict) or set(protected) != set(TARGET_NAMES):
+        raise RuntimeError("R4 plan target snapshot is incomplete")
+    for name, expected in PROTECTED_TARGETS.items():
+        actual = protected.get(name, {})
+        if not _near(
+            actual.get("position", []),
+            expected["position"],
+            TARGET_TOLERANCE,
+        ):
+            raise RuntimeError(f"R4 plan target position differs: {name}")
+        if not _near(
+            actual.get("orientation_euler", []),
+            expected["orientation_euler"],
+            TARGET_TOLERANCE,
+        ):
+            raise RuntimeError(f"R4 plan target orientation differs: {name}")
+
+    paths = plan.get("paths")
+    if not isinstance(paths, dict):
+        raise RuntimeError("R4 plan has no paths")
+    for name in REQUIRED_PATHS:
+        if not _finite_joint_path(paths.get(name)):
+            raise RuntimeError(f"R4 plan path is invalid: {name}")
+        if _path_has_invalid_joint_branch(paths[name]):
+            raise RuntimeError(f"R4 plan uses an invalid joint branch: {name}")
+    for first_name, second_name in (
+        ("home_to_wait", "wait_to_app"),
+        ("wait_to_app", "descend_to_tcp"),
+        ("initial_to_app", "descend_to_tcp"),
+        ("descend_to_tcp", "press"),
+        ("press", "retract_to_app"),
+        ("retract_to_app", "app_to_wait"),
+    ):
+        if (
+            _max_joint_gap(paths[first_name][-1], paths[second_name][0])
+            > MAX_PATH_BOUNDARY_JUMP_RAD
+        ):
+            raise RuntimeError(
+                "R4 plan path boundary jumps: "
+                f"{first_name} -> {second_name}"
+            )
+    if (
+        _max_joint_gap(paths["initial_to_app"][-1], paths["retract_to_app"][-1])
+        > MAX_PATH_BOUNDARY_JUMP_RAD
+    ):
+        raise RuntimeError("R4 plan does not return to screw APP")
+    if (
+        _max_joint_gap(paths["home_to_wait"][-1], paths["app_to_wait"][-1])
+        > MAX_PATH_BOUNDARY_JUMP_RAD
+    ):
+        raise RuntimeError("R4 plan does not return to the taught wait point")
+
+    workspace = plan.get("workspace", {})
+    expected_workspace = WORKSPACES["R4"]
+    if tuple(workspace.get("lower", ())) != tuple(expected_workspace["lower"]):
+        raise RuntimeError("R4 plan lower workspace wall differs from the contract")
+    if tuple(workspace.get("upper", ())) != tuple(expected_workspace["upper"]):
+        raise RuntimeError("R4 plan upper workspace wall differs from the contract")
+
+    validation = plan.get("validation", {})
+    fingerprint = validation.get("scene_fingerprint", {})
+    if not isinstance(fingerprint.get("sha256"), str) or not isinstance(
+        fingerprint.get("size"), int
+    ):
+        raise RuntimeError("R4 plan has no validated scene fingerprint")
+    return plan
 
 
 def _find_alias(sim: Any, root: int, alias: str) -> int:
@@ -431,6 +562,7 @@ class R4SafetyGuard:
         self.shape_bbs = {
             handle: sim.getShapeBB(handle) for handle in self.moving_shapes
         }
+        self.ensure_tool_visible()
 
     def close(self) -> None:
         self.sim.destroyCollection(self.mover)
@@ -438,12 +570,21 @@ class R4SafetyGuard:
         self.sim.destroyCollection(self.tool_collection)
         self.sim.destroyCollection(self.lower_arm_collection)
 
+    def ensure_tool_visible(self) -> None:
+        for handle in self.tool_shapes:
+            self.sim.setObjectInt32Param(
+                handle,
+                self.sim.objintparam_visibility_layer,
+                1,
+            )
+
     def check(
         self,
         label: str,
         check_workspace: bool = True,
         check_internal: bool = True,
     ) -> None:
+        self.ensure_tool_visible()
         state, pair = self.sim.checkCollision(self.mover, self.environment)
         if state:
             paths = [self.sim.getObjectAlias(handle, 1) for handle in pair]
@@ -526,10 +667,12 @@ class _SmoothRunner:
         force_collision: bool = False,
         force_full: bool = False,
     ) -> None:
+        self.guard.ensure_tool_visible()
         if not self.bridge.step():
             raise RuntimeError(
                 self.bridge.last_error or "R4 simulation step failed"
             )
+        self.guard.ensure_tool_visible()
         self.step_index += 1
         collision_due = (
             force_collision
@@ -594,7 +737,7 @@ class R4MotionController:
     def __init__(
         self,
         bridge: SimBridge,
-        r1_plan_path: Path = R1_PLAN_PATH,
+        r1_plan_path: Path | None = None,
         inspection_lock: Optional[threading.Lock] = None,
         speed_deg_s: float = TRANSFER_SPEED_DEG_S,
         hold_seconds: float = HOLD_SECONDS,
@@ -603,8 +746,8 @@ class R4MotionController:
     ):
         if speed_deg_s <= 0.0:
             raise ValueError("speed_deg_s must be positive")
+        _ = r1_plan_path
         self.bridge = bridge
-        self.r1_plan_path = Path(r1_plan_path)
         self.inspection_lock = inspection_lock or threading.Lock()
         self.speed_deg_s = float(speed_deg_s)
         self.hold_seconds = max(0.0, float(hold_seconds))
@@ -632,7 +775,7 @@ class R4MotionController:
         return result
 
     def _validate_static(self) -> None:
-        plan = load_r1_plan(self.r1_plan_path)
+        plan = load_r4_plan()
         scene = Path(self.bridge.scene_path())
         if scene.name != SCENE_NAME:
             raise RuntimeError(f"unexpected CoppeliaSim scene: {scene}")
@@ -712,131 +855,76 @@ class R4MotionController:
 
     @staticmethod
     def _remove_runtime_tool(sim: Any, tool: dict[str, Any]) -> None:
+        # Native tools (empty objects list) must not be deleted.
+        objects = tool.get("objects", [])
+        if not objects:
+            return
         # CoppeliaSim reparents children when only their parent is removed.
         # Delete the deepest objects first so no runtime shape survives.
-        for handle in reversed(tool["objects"]):
+        for handle in reversed(objects):
             try:
                 sim.removeObjects([handle])
             except Exception:
                 pass
 
-    def _create_runtime_tool(
+    def _discover_native_tool(
         self, robot: int
     ) -> dict[str, Any]:
+        """Return the scene-native R4 screwdriver objects for IK and rotation.
+
+        The new ``compact_cell1ttt.ttt`` scene already contains a complete
+        screwdriver model (``/R4/R4T``) mounted to Link6, including a TCP
+        dummy ``R4_tool_tip`` and a spin link ``R4T_screw_spin_link``.
+        """
         sim = self.bridge.sim
-        self._remove_stale_runtime_objects(sim, robot)
         link6 = _find_alias(sim, robot, "Link6_visual")
 
-        tip = sim.createDummy(0.004)
-        sim.setObjectAlias(tip, f"{RUNTIME_PREFIX}Screwdriver_TCP")
-        sim.setObjectParent(tip, link6, False)
-        sim.setObjectPose(
-            tip,
-            link6,
-            [0.0, 0.0, TOOL_TCP_OFFSET_M, 0.0, 0.0, 0.0, 1.0],
-        )
-        sim.setObjectInt32Param(
-            tip, sim.objintparam_visibility_layer, 0
+        tip_alias = ROBOT_TIPS.get("R4", "R4_tool_tip")
+        tip_candidates = [
+            handle
+            for handle in sim.getObjectsInTree(robot, sim.handle_all, 0)
+            if sim.getObjectAlias(handle) == tip_alias
+        ]
+        if len(tip_candidates) != 1:
+            raise RuntimeError(
+                f"expected one native R4 tip alias '{tip_alias}', "
+                f"found {len(tip_candidates)}"
+            )
+        tip = tip_candidates[0]
+
+        spin_alias = "R4T_screw_spin_link"
+        spin_candidates = [
+            handle
+            for handle in sim.getObjectsInTree(robot, sim.handle_all, 0)
+            if sim.getObjectAlias(handle) == spin_alias
+        ]
+        spinner = spin_candidates[0] if len(spin_candidates) == 1 else tip
+        spinner_parent = sim.getObjectParent(spinner)
+        spinner_initial_orientation = [
+            float(value)
+            for value in sim.getObjectOrientation(spinner, spinner_parent)
+        ]
+
+        tool_root = sim.getObject("/R4/R4T")
+        tool_shapes = set(
+            sim.getObjectsInTree(tool_root, sim.object_shape_type, 0)
         )
 
-        spinner = sim.createDummy(0.003)
-        sim.setObjectAlias(spinner, f"{RUNTIME_PREFIX}Screwdriver_Spinner")
-        sim.setObjectParent(spinner, link6, False)
-        sim.setObjectPose(
-            spinner, link6, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-        )
-        sim.setObjectInt32Param(
-            spinner, sim.objintparam_visibility_layer, 0
-        )
-
-        shaft_length = TOOL_TCP_OFFSET_M - TOOL_HANDLE_LENGTH_M
-        shaft = sim.createPrimitiveShape(
-            sim.primitiveshape_cylinder,
-            [TOOL_SHAFT_DIAMETER_M, TOOL_SHAFT_DIAMETER_M, shaft_length],
-            0,
-        )
-        sim.setObjectAlias(shaft, f"{RUNTIME_PREFIX}Screwdriver_Shaft")
-        sim.setObjectParent(shaft, spinner, False)
-        sim.setObjectPose(
-            shaft,
-            spinner,
-            [
-                0.0,
-                0.0,
-                TOOL_HANDLE_LENGTH_M + shaft_length / 2.0,
-                0.0,
-                0.0,
-                0.0,
-                1.0,
-            ],
-        )
-
-        handle = sim.createPrimitiveShape(
-            sim.primitiveshape_cylinder,
-            [
-                TOOL_HANDLE_DIAMETER_M,
-                TOOL_HANDLE_DIAMETER_M,
-                TOOL_HANDLE_LENGTH_M,
-            ],
-            0,
-        )
-        sim.setObjectAlias(handle, f"{RUNTIME_PREFIX}Screwdriver_Handle")
-        sim.setObjectParent(handle, link6, False)
-        sim.setObjectPose(
-            handle,
-            link6,
-            [
-                0.0,
-                0.0,
-                TOOL_HANDLE_LENGTH_M / 2.0,
-                0.0,
-                0.0,
-                0.0,
-                1.0,
-            ],
-        )
-
-        marker = sim.createPrimitiveShape(
-            sim.primitiveshape_cuboid,
-            [0.004, 0.012, 0.006],
-            0,
-        )
-        sim.setObjectAlias(marker, f"{RUNTIME_PREFIX}Rotation_Marker")
-        sim.setObjectParent(marker, spinner, False)
-        sim.setObjectPose(
-            marker,
-            spinner,
-            [0.006, 0.0, 0.073, 0.0, 0.0, 0.0, 1.0],
-        )
-
-        for shape in (shaft, handle, marker):
-            sim.setObjectInt32Param(shape, sim.shapeintparam_static, 1)
-            sim.setObjectInt32Param(shape, sim.shapeintparam_respondable, 0)
-        sim.setShapeColor(
-            shaft,
-            None,
-            sim.colorcomponent_ambient_diffuse,
-            [0.65, 0.68, 0.72],
-        )
-        sim.setShapeColor(
-            handle,
-            None,
-            sim.colorcomponent_ambient_diffuse,
-            [0.08, 0.10, 0.12],
-        )
-        sim.setShapeColor(
-            marker,
-            None,
-            sim.colorcomponent_ambient_diffuse,
-            [0.90, 0.15, 0.08],
-        )
         return {
             "tip": tip,
             "spinner": spinner,
-            "objects": [tip, spinner, shaft, handle, marker],
-            "shapes": {shaft, handle, marker},
+            "spinner_parent": spinner_parent,
+            "spinner_initial_orientation": spinner_initial_orientation,
+            "objects": [],   # native tool — nothing to clean up
+            "shapes": tool_shapes,
             "link6": link6,
         }
+
+    def _create_runtime_tool(
+        self, robot: int
+    ) -> dict[str, Any]:
+        """Legacy alias; redirects to native-tool discovery."""
+        return self._discover_native_tool(robot)
 
     def _build_paths(
         self,
@@ -913,10 +1001,9 @@ class R4MotionController:
                 "initial_to_app": initial,
                 "descend_to_tcp": descend,
                 "press": press,
-                "retract_and_home": _join_paths(
+                "retract_to_app": _join_paths(
                     list(reversed(press)),
                     list(reversed(descend)),
-                    list(reversed(initial)),
                 ),
             }
             if self._target_snapshot() != protected_before:
@@ -941,22 +1028,19 @@ class R4MotionController:
             math.radians(JOINT_TOLERANCE_DEG),
         ):
             raise RuntimeError("R4 is not zero during preparation")
-        client = getattr(self.bridge, "_client", None)
-        if client is None:
-            raise RuntimeError("CoppeliaSim remote client is unavailable")
-        robot = self.bridge.get_object_handle(ROBOT_ID)
-        joints = self.bridge.get_robot_joint_handles(ROBOT_ID)
-        tool = self._create_runtime_tool(robot)
-        try:
-            prepared_paths = self._build_paths(
-                client.require("simIK"), robot, tool["tip"], joints
-            )
-        finally:
-            self._remove_runtime_tool(sim, tool)
+        plan = load_r4_plan()
+        prepared_paths = {
+            name: [
+                [float(joint) for joint in config]
+                for config in plan["paths"][name]
+            ]
+            for name in REQUIRED_PATHS
+        }
         self._prepared_paths = prepared_paths
         return {
             "robot_id": ROBOT_ID,
             "prepared_actions": [R4_SCREW_DONE],
+            "path_source": str(PLAN_PATH),
             "path_points": {
                 name: len(path) for name, path in prepared_paths.items()
             },
@@ -969,6 +1053,33 @@ class R4MotionController:
         """Record the joint config set by ``_preposition_robots()``."""
         _ = action
         self._pre_positioned_config = list(config)
+
+    def _startup_paths(
+        self, paths: dict[str, list[list[float]]]
+    ) -> list[tuple[str, list[list[float]]]]:
+        if self._pre_positioned_config is None:
+            return [
+                ("R4 home_to_wait", paths["home_to_wait"]),
+                ("R4 wait_to_screw_app", paths["wait_to_app"]),
+            ]
+
+        tolerance = math.radians(JOINT_TOLERANCE_DEG)
+        if _near(
+            self._pre_positioned_config,
+            paths["home_to_wait"][-1],
+            tolerance,
+        ):
+            return [("R4 wait_to_screw_app", paths["wait_to_app"])]
+        if _near(
+            self._pre_positioned_config,
+            paths["initial_to_app"][-1],
+            tolerance,
+        ):
+            return []
+        raise RuntimeError(
+            "R4 pre-positioned config is neither the taught wait point nor "
+            "R4_SCREW_APP"
+        )
 
     def _create_command_script(self, robot: int) -> int:
         sim = self.bridge.sim
@@ -1044,14 +1155,14 @@ class R4MotionController:
             if self._prepared_paths is not None:
                 paths = self._prepared_paths
             else:
-                client = getattr(self.bridge, "_client", None)
-                if client is None:
-                    raise RuntimeError(
-                        "CoppeliaSim remote client is unavailable"
-                    )
-                paths = self._build_paths(
-                    client.require("simIK"), robot, tool["tip"], joints
-                )
+                plan = load_r4_plan()
+                paths = {
+                    name: [
+                        [float(joint) for joint in config]
+                        for config in plan["paths"][name]
+                    ]
+                    for name in REQUIRED_PATHS
+                }
             original_max_velocities = [
                 sim.getObjectFloatParam(
                     joint, sim.jointfloatparam_maxvel
@@ -1065,7 +1176,13 @@ class R4MotionController:
                 sim.setObjectFloatParam(
                     joint, sim.jointfloatparam_maxvel, max_velocity
                 )
-                sim.setJointTargetPosition(joint, 0.0)
+            start_targets = (
+                self._pre_positioned_config
+                if self._pre_positioned_config is not None
+                else [0.0] * 6
+            )
+            for joint, target in zip(joints, start_targets):
+                sim.setJointTargetPosition(joint, float(target))
 
             command_script = self._create_command_script(robot)
             if not self.bridge.start_simulation():
@@ -1089,21 +1206,20 @@ class R4MotionController:
             )
 
             with self.inspection_lock:
-                if self._pre_positioned_config is None:
+                if self._pre_positioned_config is None and not prepared_mode:
+                    runner.hold(0.5, "R4 startup")
+                # Generator initialization hides template product shapes.
+                # R4 treats this inspection product as the executor-owned
+                # visual workpiece until the real R3 transfer is available.
+                self._set_product_visible(sim, product_layers)
+                for label, path in self._startup_paths(paths):
                     if not prepared_mode:
-                        runner.hold(0.5, "R4 startup")
-                    # Generator initialization hides template product shapes.
-                    # R4 treats this inspection product as the executor-owned
-                    # visual workpiece until the real R3 transfer is available.
-                    self._set_product_visible(sim, product_layers)
-                    runner.step("R4 inspection product visible", force_full=True)
+                        runner.step("R4 inspection product visible", force_full=True)
                     runner.execute_path(
-                        "R4 initial_to_screw_app",
-                        paths["initial_to_app"],
+                        label,
+                        path,
                         transfer_speed,
                     )
-                # else: pre-positioned at screw APP — skip the initial
-                # approach to reduce simulation-time handoff delay.
                 runner.hold(self.hold_seconds, "R4 hold above screw")
                 runner.execute_path(
                     "R4 descend_to_screw_tcp",
@@ -1121,6 +1237,8 @@ class R4MotionController:
                 rotation_steps = max(
                     2, math.ceil(TOOL_ROTATION_SECONDS / runner.dt)
                 )
+                spinner_parent = tool["spinner_parent"]
+                spinner_initial_orientation = tool["spinner_initial_orientation"]
                 for index in range(1, rotation_steps + 1):
                     angle = (
                         2.0
@@ -1130,33 +1248,49 @@ class R4MotionController:
                         / rotation_steps
                     )
                     sim.setObjectOrientation(
-                        tool["spinner"], tool["link6"], [0.0, 0.0, angle]
+                        tool["spinner"],
+                        spinner_parent,
+                        [
+                            spinner_initial_orientation[0],
+                            spinner_initial_orientation[1],
+                            spinner_initial_orientation[2] + angle,
+                        ],
                     )
                     runner.step("R4 visible screw rotation")
                 sim.setObjectOrientation(
-                    tool["spinner"], tool["link6"], [0.0, 0.0, 0.0]
+                    tool["spinner"],
+                    spinner_parent,
+                    spinner_initial_orientation,
                 )
                 runner.step("R4 rotation complete", force_full=True)
                 self.bridge.set_string_signal("cell_screw_state", "done")
 
                 runner.execute_path(
-                    "R4 retract_and_return_home",
-                    paths["retract_and_home"],
+                    "R4 retract_to_screw_app",
+                    paths["retract_to_app"],
                     transfer_speed,
                 )
-                runner.hold(0.4, "R4 final home hold")
+                runner.hold(0.25, "R4 post-screw APP transit hold")
+                runner.execute_path(
+                    "R4 app_to_wait",
+                    paths["app_to_wait"],
+                    transfer_speed,
+                )
+                runner.hold(0.4, "R4 final wait hold")
 
             final_joints = runner.joint_positions()
+            expected_final = paths["app_to_wait"][-1]
             if not _near(
                 final_joints,
-                [0.0] * 6,
+                expected_final,
                 math.radians(JOINT_TOLERANCE_DEG),
             ):
-                raise RuntimeError("R4 did not return to the validated zero state")
+                raise RuntimeError("R4 did not reach the taught wait point")
             result = {
                 "action": action,
                 "visual_screwdriver_only": True,
                 "physical_torque_validated": False,
+                "final_standby": R4_WAIT_POINT,
                 "runtime_orientation_deg": list(RUNTIME_ORIENTATION_DEG),
                 "runtime_tool_tcp_offset_m": TOOL_TCP_OFFSET_M,
                 "rotation_turns": TOOL_ROTATION_TURNS,
@@ -1207,4 +1341,12 @@ class R4MotionController:
                         pass
 
 
-__all__ = ["R4_ACTIONS", "R4_SCREW_DONE", "R4MotionController"]
+__all__ = [
+    "PLAN_PATH",
+    "R4_ACTIONS",
+    "R4_POST_SCREW_STANDBY",
+    "R4_WAIT_POINT",
+    "R4_SCREW_DONE",
+    "R4MotionController",
+    "load_r4_plan",
+]

@@ -18,7 +18,6 @@ moveit_simple_controller_manager:
       - joint5
       - joint6
 
-      # 【必须追加这部分】
 trajectory_execution:
   allowed_execution_duration_scaling: 5.0  # 允许实际耗时是理论值的 5 倍
   allowed_goal_duration_margin: 5.0        # 允许额外 5 秒延迟

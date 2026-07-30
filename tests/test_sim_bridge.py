@@ -40,7 +40,7 @@ class FakeSim:
             "/FiveCR5A_Cell/Parts/Box_Blank": 3,
             "/FiveCR5A_Cell/Parts/Assembly_ControlBox_Product": 4,
             "/R1": 10,
-            "/R1/R1_ROBOTIQ85": 20,
+            "/R1/R1T": 20,
             POINTS["R1_BOX_PICK_APP"]: 30,
         }
         self.aliases = {
@@ -52,8 +52,8 @@ class FakeSim:
             **{handle: f"joint{handle - 10}" for handle in range(11, 17)},
             17: "R1_gripper_tip",
             18: "ROBOTIQ_85_active1",
-            20: "R1_ROBOTIQ85",
-            22: "Robotiq_Script",
+            20: "R1T",
+            22: "R1T_Script",
             23: "active1",
             24: "active2",
             30: "R1_BOX_PICK_APP",
@@ -93,7 +93,7 @@ class FakeSim:
         return self.joint_positions[handle]
 
     def getObjectPosition(self, handle, relative_to):
-        return [-1.8, 0.35, 0.55] if handle == 30 else [1.0, 2.0, 3.0]
+        return [-1.86, 0.22, 0.432] if handle == 30 else [1.0, 2.0, 3.0]
 
     def getObjectOrientation(self, handle, relative_to):
         return [0.1, 0.2, 0.3]
@@ -132,7 +132,7 @@ class FakeSim:
         self.state = self.simulation_stopped
 
     def getStringParam(self, parameter):
-        return "/tmp/five_cr5a_cell.ttt"
+        return "/tmp/compact_cell1ttt.ttt"
 
 
 class FakeClient:
@@ -196,16 +196,22 @@ class SceneContractTests(unittest.TestCase):
         self.assertFalse(r2["lock_required"])
         self.assertTrue(WORKSPACES["ASSEMBLY_SHARED"]["lock_required"])
         self.assertEqual(
-            WORKSPACES["R2"]["lower"], (-1.90, -0.55, 0.04)
+            WORKSPACES["R2"]["lower"], (-1.90, -0.80, 0.04)
         )
         self.assertEqual(
             WORKSPACES["R4"]["lower"], (-0.05, -0.20, 0.04)
         )
         self.assertEqual(
+            WORKSPACES["R4"]["upper"], (1.00, 0.72, 1.55)
+        )
+        self.assertEqual(
             WORKSPACES["R3"]["lower"], (-1.40, -0.38, 0.04)
         )
         self.assertEqual(
-            WORKSPACES["R5"]["upper"], (0.98, 0.48, 1.55)
+            WORKSPACES["R3"]["upper"], (0.60, 0.72, 1.55)
+        )
+        self.assertEqual(
+            WORKSPACES["R5"]["upper"], (1.30, 0.48, 1.55)
         )
         self.assertTrue(WORKSPACES["INSPECTION_SHARED"]["lock_required"])
         self.assertEqual(WORKSPACES["INSPECTION_SHARED"]["max_robots"], 1)
@@ -227,7 +233,7 @@ class SimBridgeTests(unittest.TestCase):
     def test_resolves_contract_target_and_pose(self):
         self.assertEqual(self.bridge.get_object_handle("R1_BOX_PICK_APP"), 30)
         pose = self.bridge.get_target_pose("R1_BOX_PICK_APP")
-        self.assertEqual(pose["position"], [-1.8, 0.35, 0.55])
+        self.assertEqual(pose["position"], [-1.86, 0.22, 0.432])
         self.assertEqual(pose["quaternion"], [0.0, 0.0, 0.0, 1.0])
 
     def test_discovers_only_six_arm_joints(self):
@@ -266,18 +272,12 @@ class SimBridgeTests(unittest.TestCase):
         self.factory.sim.state = self.factory.sim.simulation_running
         self.assertTrue(self.bridge.set_gripper("R1", False))
         self.assertEqual(
-            self.factory.sim.script_calls[-1], ("closeClicked", 22, 0, 2)
+            self.factory.sim.signals["tool_cmd"], "R1_GRIPPER_CLOSE"
         )
-        self.assertEqual(
-            self.factory.sim.int_params[(22, self.factory.sim.scriptintparam_enabled)],
-            1,
-        )
+        self.assertEqual(self.factory.sim.script_calls, [])
         self.assertTrue(self.bridge.freeze_gripper("R1"))
-        self.assertEqual(
-            self.factory.sim.int_params[(22, self.factory.sim.scriptintparam_enabled)],
-            0,
-        )
-        self.assertEqual(self.factory.sim.joint_velocities, {23: 0.0, 24: 0.0})
+        self.assertEqual(self.factory.sim.int_params, {})
+        self.assertEqual(self.factory.sim.joint_velocities, {})
 
     def test_start_step_stop(self):
         self.assertTrue(self.bridge.start_simulation())
@@ -295,7 +295,7 @@ class SimBridgeTests(unittest.TestCase):
 
         self.assertEqual(self.factory.client.step_count, 1)
         self.assertEqual(
-            self.factory.sim.script_calls[-1], ("openClicked", 22, 0, 1)
+            self.factory.sim.signals["tool_cmd"], "R1_GRIPPER_OPEN"
         )
         self.assertTrue(self.bridge.start_simulation())
         self.assertTrue(self.factory.client.stepping)

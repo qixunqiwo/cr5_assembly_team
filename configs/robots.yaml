@@ -23,9 +23,9 @@ robots:
     home_pose: [0, 0, 0, 0, 0, 0]
     home_point: R2_HOME_REF
     capabilities: [pcb_install, pick_and_place]
-    end_effector: gripper
+    end_effector: vacuum
     work_area: [pcb_supply_area, assembly_fixture]
-    tip: R2_gripper_tip
+    tip: R2_vacuum_tip
 
   R3:
     name: "Module installation and transfer robot"
@@ -44,7 +44,7 @@ robots:
     name: "Terminal screw fastening robot"
     model: DOBOT CR5A
     model_file: cr5_robot_fixed.urdf
-    position: [0.58, 0.25, 0]
+    position: [0.78, 0.25, 0]
     base_object: R4_Base
     home_pose: [0, 0, 0, 0, 0, 0]
     home_point: R4_HOME_REF
@@ -57,7 +57,7 @@ robots:
     name: "Post-inspection sorting robot"
     model: DOBOT CR5A
     model_file: cr5_robot_fixed.urdf
-    position: [0.15, -0.50, 0]
+    position: [0.35, -0.50, 0]
     base_object: R5_Base
     home_pose: [0, 0, 0, 0, 0, 0]
     home_point: R5_HOME_REF

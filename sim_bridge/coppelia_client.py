@@ -299,85 +299,28 @@ class SimBridge(ISimBridge):
     def set_gripper(self, robot_id: str, open: bool) -> bool:
         self._require_connected()
         robot_id = normalize_robot_id(robot_id)
-        tool_path = ROBOT_TOOL_ROOTS.get(robot_id)
-        if tool_path is None:
-            self._last_error = f"no calibrated gripper is registered for {robot_id}"
-            return False
         try:
             if self._sim.getSimulationState() == self._sim.simulation_stopped:
-                self._last_error = "gripper scripts require a running simulation"
+                self._last_error = "gripper commands require a running simulation"
                 return False
-            tool = self._sim.getObject(tool_path)
-            scripts = self._sim.getObjectsInTree(
-                tool, self._sim.object_script_type, 0
-            )
-            if len(scripts) != 1:
-                raise RuntimeError(
-                    f"expected one gripper script below {tool_path}, "
-                    f"found {len(scripts)}"
-                )
-            # The stock Robotiq script applies velocity continuously and has
-            # no open-position limit.  Coordinated runs freeze it after each
-            # short animation, so re-enable it explicitly for the next
-            # command.
-            was_enabled = bool(
-                self._sim.getObjectInt32Param(
-                    scripts[0], self._sim.scriptintparam_enabled
-                )
-            )
-            self._sim.setObjectInt32Param(
-                scripts[0], self._sim.scriptintparam_enabled, 1
-            )
-            if not was_enabled and self._stepping and not self.step():
-                raise RuntimeError(
-                    self._last_error or "cannot initialize re-enabled gripper script"
-                )
-            function_name = "openClicked" if open else "closeClicked"
-            mode = 1 if open else 2
-            self._sim.callScriptFunction(function_name, scripts[0], 0, mode)
+            # New native tools (R1T/R3T/R5T) are controlled by the
+            # Step02B script via the 'tool_cmd' string signal.
+            action = "GRIPPER_OPEN" if open else "GRIPPER_CLOSE"
+            self.set_string_signal("tool_cmd", f"{robot_id}_{action}")
+            if self._stepping:
+                self.step()
             return True
         except Exception as exc:
             self._last_error = str(exc)
             return False
 
     def freeze_gripper(self, robot_id: str) -> bool:
-        """Stop the stock gripper's unbounded velocity after visual motion."""
-        self._require_connected()
-        robot_id = normalize_robot_id(robot_id)
-        tool_path = ROBOT_TOOL_ROOTS.get(robot_id)
-        if tool_path is None:
-            self._last_error = f"no calibrated gripper is registered for {robot_id}"
-            return False
-        try:
-            tool = self._sim.getObject(tool_path)
-            scripts = self._sim.getObjectsInTree(
-                tool, self._sim.object_script_type, 0
-            )
-            if len(scripts) != 1:
-                raise RuntimeError(
-                    f"expected one gripper script below {tool_path}, "
-                    f"found {len(scripts)}"
-                )
-            active = [
-                handle
-                for handle in self._sim.getObjectsInTree(
-                    tool, self._sim.object_joint_type, 0
-                )
-                if self._sim.getObjectAlias(handle) in {"active1", "active2"}
-            ]
-            if len(active) != 2:
-                raise RuntimeError(
-                    f"expected active1/active2 below {tool_path}, found {len(active)}"
-                )
-            self._sim.setObjectInt32Param(
-                scripts[0], self._sim.scriptintparam_enabled, 0
-            )
-            for joint in active:
-                self._sim.setJointTargetVelocity(joint, 0.0)
-            return True
-        except Exception as exc:
-            self._last_error = str(exc)
-            return False
+        """Native tools are position-controlled; no velocity to freeze."""
+        return True
+
+    def unfreeze_gripper(self, robot_id: str) -> bool:
+        """Native tools are position-controlled; nothing to unfreeze."""
+        return True
 
     def start_simulation(self) -> bool:
         self._require_connected()

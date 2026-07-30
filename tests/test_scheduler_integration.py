@@ -62,8 +62,15 @@ class FakeBaseExecutor:
         self.actions = []
         self.prepare_calls = []
 
-    def prepare_cycle(self, quality, preload_both_r5=False):
-        self.prepare_calls.append((quality, preload_both_r5))
+    def prepare_cycle(
+        self,
+        quality,
+        preload_both_r5=False,
+        preposition_front_half=False,
+    ):
+        self.prepare_calls.append(
+            (quality, preload_both_r5, preposition_front_half)
+        )
         return {"ready": True, "path_points_total": 123}
 
     def execute_task(self, task):
@@ -273,7 +280,7 @@ class IntegratedRobotExecutorTests(unittest.TestCase):
         executor.close()
 
         self.assertTrue(evidence["ready"])
-        self.assertEqual(base.prepare_calls, [("defect", True)])
+        self.assertEqual(base.prepare_calls, [("defect", True, False)])
         self.assertEqual(monitors.prepared, 1)
         self.assertEqual(monitors.closed, 1)
 
@@ -311,6 +318,10 @@ class IntegratedRobotExecutorTests(unittest.TestCase):
             second.metrics["handoff_to_first_motion_simulation_s"], 0.25
         )
         self.assertIn("camera_transition", second.metrics)
+        self.assertAlmostEqual(
+            second.metrics["camera_transition"]["simulation_time_before"],
+            2.0,
+        )
         self.assertEqual(bridge.stepping[-2:], [True, False])
 
     def test_camera_step_preserves_existing_ready_stepping(self):

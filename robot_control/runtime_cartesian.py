@@ -883,6 +883,61 @@ class SmoothRunner:
             raise RuntimeError(f"{label} did not settle at its endpoint")
         self.guard.check(f"{label} endpoint")
 
+    def execute_path_with_payload_orientation(
+        self,
+        label: str,
+        configs: list[list[float]],
+        peak_speed_rad_s: float,
+        start_euler: Iterable[float],
+        target_euler: Iterable[float],
+    ) -> None:
+        cumulative = cumulative_max_joint_distance(configs)
+        total = cumulative[-1]
+        if total <= 1e-12:
+            raise RuntimeError(f"{label} has no joint motion")
+        start = list(start_euler)
+        target = list(target_euler)
+        delta = [
+            wrap_near(first, second) - first
+            for first, second in zip(start, target)
+        ]
+        duration = max(0.55, 1.875 * total / peak_speed_rad_s)
+        step_count = max(2, math.ceil(duration / self.dt))
+        for index in range(1, step_count + 1):
+            progress = minimum_jerk(index / step_count)
+            joint_target = interpolate_path(
+                configs,
+                cumulative,
+                total * progress,
+            )
+            self.lock_payload_world_orientation(
+                [
+                    start[axis] + delta[axis] * progress
+                    for axis in range(3)
+                ]
+            )
+            self.sim.callScriptFunction(
+                "setJointTargets",
+                self.command_script,
+                self.joints,
+                joint_target,
+            )
+            self.step(f"{label} [{index}/{step_count}]")
+
+        final = configs[-1]
+        self.lock_payload_world_orientation(target)
+        for _ in range(100):
+            errors = [
+                abs(actual - expected)
+                for actual, expected in zip(self.joint_positions(), final)
+            ]
+            if max(errors) <= math.radians(0.12):
+                break
+            self.step(f"{label} settle")
+        else:
+            raise RuntimeError(f"{label} did not settle at its endpoint")
+        self.guard.check(f"{label} endpoint")
+
     def animate_world_offset(
         self,
         payload: int,

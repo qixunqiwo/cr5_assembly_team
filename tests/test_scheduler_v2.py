@@ -6,6 +6,7 @@ from scheduler.assembly_process import AssemblyProcessPlanner
 from scheduler.experiment import DiscreteEventExperiment
 from scheduler.scheduler import Scheduler
 from scheduler.task_generator import TaskGenerator
+from robot_control.r5_motion import R5_SORT_DEFECT_DONE, R5_SORT_GOOD_DONE
 
 
 class SchedulerV2Tests(unittest.TestCase):
@@ -145,29 +146,23 @@ class SchedulerV2Tests(unittest.TestCase):
 
     def test_real_scheduler_generates_only_selected_sort_branch(self):
         scheduler = Scheduler()
-        tasks = scheduler.generate_tasks([Order("A100", "A", 1)])
-        inspect = next(task for task in tasks if task.process == "inspect")
-        screw = next(task for task in tasks if task.process == "screw")
-        inspect.status = TaskStatus.RUNNING.value
-        inspect_result = TaskResult(
-            inspect.task_id,
-            "CAMERA",
-            TaskStatus.FINISHED.value,
-            end_time=30,
-            quality_result="OK",
+        good_tasks = scheduler.generate_tasks([Order("A100", "A", 1)])
+        good_branches = [
+            task for task in good_tasks if task.process.startswith("sort_")
+        ]
+        self.assertEqual([task.process for task in good_branches], ["sort_good"])
+        self.assertEqual(good_branches[0].target_point, R5_SORT_GOOD_DONE)
+
+        defect_tasks = scheduler.generate_tasks(
+            [Order("A101", "A", 1, expected_quality="NG")]
         )
-        scheduler.on_task_complete(inspect_result, tasks, [])
-        self.assertFalse(any(task.process.startswith("sort_") for task in tasks))
-        screw.status = TaskStatus.RUNNING.value
-        screw_result = TaskResult(
-            screw.task_id,
-            "R4",
-            TaskStatus.FINISHED.value,
-            end_time=40,
+        defect_branches = [
+            task for task in defect_tasks if task.process.startswith("sort_")
+        ]
+        self.assertEqual(
+            [task.process for task in defect_branches], ["sort_defect"]
         )
-        scheduler.on_task_complete(screw_result, tasks, [])
-        branches = [task.process for task in tasks if task.process.startswith("sort_")]
-        self.assertEqual(branches, ["sort_good"])
+        self.assertEqual(defect_branches[0].target_point, R5_SORT_DEFECT_DONE)
 
     def test_mock_scheduler_generates_only_selected_sort_branch(self):
         scheduler = MockScheduler()

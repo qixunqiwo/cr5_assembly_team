@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 import unittest
 
@@ -12,14 +13,32 @@ from robot_control.r1_motion import (
     load_r1_plan,
 )
 from robot_control.r2_motion import R2_PCB_PLACED
-from robot_control.r3_motion import R3_MODULE_PLACED, R3_PRODUCT_TO_INSPECTION
-from robot_control.r4_motion import R4_SCREW_DONE, R4MotionController
+from robot_control.r3_motion import (
+    INSPECTION_PRODUCT_ORIENTATION,
+    INSPECTION_PRODUCT_POSITION,
+    PRODUCT_RELEASE_SETTLE_STEPS,
+    R3_MODULE_PLACED,
+    R3_PRODUCT_TO_INSPECTION,
+)
+from robot_control.r4_motion import (
+    R4_SCREW_DONE,
+    R4_WAIT_POINT,
+    R4MotionController,
+    load_r4_plan,
+)
 from robot_control.r5_motion import (
+    BELT_HEIGHT_CORRECTION_M,
+    DEFECT_TARGET_PRODUCT_YAW_DEG,
+    GOOD_RELEASE_CENTERING_OFFSET_M,
     GOOD_RUNTIME_XY_OFFSET_M,
+    GOOD_TARGET_PRODUCT_YAW_DEG,
+    GOOD_TRANSFER_JOINT6_PRETURN_DEG,
     PROTECTED_TARGETS,
     R5_SORT_DEFECT_DONE,
     R5_SORT_GOOD_DONE,
     R5MotionController,
+    WAIT_TO_PICK_APP_START_DELAY_S,
+    load_r5_plan,
 )
 from robot_control.robot_executor import RobotExecutor
 
@@ -40,6 +59,45 @@ class FakeBridge:
     def set_gripper(self, robot_id, opened):
         self.gripper_calls.append((robot_id, opened))
         return robot_id == "R1"
+
+
+class FakePrepositionSim:
+    jointfloatparam_maxvel = 301
+
+    def __init__(self):
+        self.time_s = 0.0
+        self.targets: dict[str, float] = {}
+        self.joint_target_calls: list[tuple[str, float]] = []
+        self.float_param_calls: list[tuple[str, int, float]] = []
+
+    def getObjectFloatParam(self, joint, param):
+        return 0.0
+
+    def setObjectFloatParam(self, joint, param, value):
+        self.float_param_calls.append((joint, param, float(value)))
+
+    def setJointTargetPosition(self, joint, value):
+        self.targets[joint] = float(value)
+        self.joint_target_calls.append((joint, float(value)))
+
+    def getJointPosition(self, joint):
+        return self.targets.get(joint, 0.0)
+
+    def getSimulationTime(self):
+        return self.time_s
+
+
+class FakePrepositionBridge(FakeBridge):
+    def __init__(self):
+        super().__init__()
+        self.sim = FakePrepositionSim()
+
+    def get_robot_joint_handles(self, robot_id):
+        return [f"{robot_id}_J{index}" for index in range(6)]
+
+    def step(self):
+        self.sim.time_s += 0.05
+        return True
 
 
 class FakeR5TargetBridge:
@@ -146,6 +204,24 @@ class StubR3MotionController(StubR4MotionController):
     kwargs_log: list[dict] = []
 
 
+class PrepositionReadyR3Controller(StubR3MotionController):
+    pre_positioned: list[tuple[str, list[float]]] = []
+
+    def prepare(self, action):
+        record = super().prepare(action)
+        self._prepared_paths = getattr(self, "_prepared_paths", {})
+        self._prepared_paths[action] = {
+            "initial_to_pick_app": [
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.1, -0.2, 0.3, -0.4, 0.5, -0.6],
+            ]
+        }
+        return record
+
+    def set_pre_positioned(self, action, config):
+        self.pre_positioned.append((action, list(config)))
+
+
 class StubR5MotionController(StubR4MotionController):
     actions: list[str] = []
     prepare_actions: list[str] = []
@@ -194,6 +270,7 @@ class RobotExecutorTests(unittest.TestCase):
         StubR3MotionController.continuous_values = []
         StubR3MotionController.fail_with = None
         StubR3MotionController.kwargs_log = []
+        PrepositionReadyR3Controller.pre_positioned = []
         StubR5MotionController.actions = []
         StubR5MotionController.prepare_actions = []
         StubR5MotionController.continuous_values = []
@@ -246,6 +323,30 @@ class RobotExecutorTests(unittest.TestCase):
         )
         self.assertEqual(len(StubMotionController.kwargs_log), 1)
         self.assertEqual(len(StubR3MotionController.kwargs_log), 1)
+
+    def test_prepare_cycle_can_skip_front_half_visible_preposition(self):
+        bridge = FakePrepositionBridge()
+        executor = RobotExecutor(
+            sim_bridge=bridge,
+            motion_controller_factory=StubMotionController,
+            r2_motion_controller_factory=StubR2MotionController,
+            r3_motion_controller_factory=PrepositionReadyR3Controller,
+            r4_motion_controller_factory=StubR4MotionController,
+            r5_motion_controller_factory=StubR5MotionController,
+        )
+
+        evidence = executor.prepare_cycle(
+            quality="good",
+            preposition_front_half=False,
+        )
+
+        self.assertTrue(evidence["ready"])
+        self.assertEqual(bridge.sim.joint_target_calls, [])
+        self.assertEqual(PrepositionReadyR3Controller.pre_positioned, [])
+        self.assertEqual(
+            evidence["ready_state"]["preposition_simulation_time_s"],
+            0.0,
+        )
 
     def test_prepare_cycle_rejects_unknown_quality_before_scene_changes(self):
         with self.assertRaisesRegex(ValueError, "quality"):
@@ -385,7 +486,7 @@ class RobotExecutorTests(unittest.TestCase):
         self.assertEqual(StubR4MotionController.actions, [R4_SCREW_DONE])
         state = self.executor.get_robot_states()[3]
         self.assertEqual(state.status, RobotStatus.IDLE.value)
-        self.assertEqual(state.position, "home")
+        self.assertEqual(state.position, R4_WAIT_POINT)
         self.assertEqual(state.completed_tasks, 1)
         self.assertIn("visual screwdriver", result.message)
         self.assertIn("physical torque not validated", result.message)
@@ -538,10 +639,18 @@ class RobotExecutorTests(unittest.TestCase):
             "return_home",
         })
         self.assertTrue(plan["validation"]["collision_free"])
-        self.assertEqual(
-            plan["validation"]["workspace_bounds_observed"]["lower"],
-            [-1.986598, 0.045463, 0.158333],
+        self.assertEqual(plan["validation"]["virtual_tcp_offset_m"], 0.146)
+        self.assertIsInstance(
+            plan["validation"]["scene_fingerprint"]["sha256"], str
         )
+        self.assertEqual(
+            plan["validation"]["scene_fingerprint"]["size"],
+            3102300,
+        )
+        for path_name, configs in plan["paths"].items():
+            with self.subTest(path=path_name):
+                max_abs = max(abs(value) for config in configs for value in config)
+                self.assertLessEqual(max_abs, math.pi + 1e-6)
 
     def test_r4_runtime_tool_cleanup_removes_children_first(self):
         class RemovalSim:
@@ -558,6 +667,19 @@ class RobotExecutorTests(unittest.TestCase):
         self.assertEqual(sim.removed, [5, 4, 3, 2, 1])
 
 
+class R3MotionGeometryTests(unittest.TestCase):
+    def test_release_uses_standard_pose_without_settle_steps(self):
+        self.assertEqual(
+            INSPECTION_PRODUCT_POSITION,
+            (0.35, 0.05, 0.216),
+        )
+        self.assertEqual(
+            INSPECTION_PRODUCT_ORIENTATION,
+            (0.0, 0.0, 0.0),
+        )
+        self.assertEqual(PRODUCT_RELEASE_SETTLE_STEPS, 0)
+
+
 class R5MotionGeometryTests(unittest.TestCase):
     def setUp(self):
         self.bridge = FakeR5TargetBridge()
@@ -568,21 +690,22 @@ class R5MotionGeometryTests(unittest.TestCase):
 
         self.assertEqual(positions[0], PROTECTED_TARGETS["R5_PRODUCT_PICK_APP"])
         self.assertEqual(positions[1], PROTECTED_TARGETS["R5_PRODUCT_PICK_TCP"])
-        self.assertEqual(positions[2], [0.64, -1.08, 0.62])
-        self.assertEqual(positions[3], [0.64, -1.08, 0.42])
+        self.assertEqual(positions[2], [0.84, -1.08, 0.432])
+        self.assertEqual(positions[3], [0.84, -1.08, 0.252])
         self.assertEqual(GOOD_RUNTIME_XY_OFFSET_M, (-0.010, 0.020))
+        self.assertEqual(BELT_HEIGHT_CORRECTION_M, 0.0)
         self.assertEqual(
-            self.bridge.positions["R5_GOOD_PLACE_APP"], [0.65, -1.10, 0.62]
+            self.bridge.positions["R5_GOOD_PLACE_APP"], [0.85, -1.10, 0.432]
         )
         self.assertEqual(
-            self.bridge.positions["R5_GOOD_PLACE_TCP"], [0.65, -1.10, 0.42]
+            self.bridge.positions["R5_GOOD_PLACE_TCP"], [0.85, -1.10, 0.252]
         )
 
     def test_defect_targets_do_not_receive_good_runtime_offset(self):
         positions = self.controller._positions(R5_SORT_DEFECT_DONE)
 
-        self.assertEqual(positions[2], [-0.35, -1.12, 0.62])
-        self.assertEqual(positions[3], [-0.35, -1.12, 0.42])
+        self.assertEqual(positions[2], [-0.15, -1.12, 0.432])
+        self.assertEqual(positions[3], [-0.15, -1.12, 0.252])
 
     def test_parallel_yaw_error_treats_opposite_directions_as_parallel(self):
         self.assertAlmostEqual(
@@ -595,6 +718,18 @@ class R5MotionGeometryTests(unittest.TestCase):
             self.controller._parallel_yaw_error_deg(-123.0, -90.0), 33.0
         )
 
+    def test_sort_release_yaws_match_conveyor_directions(self):
+        self.assertEqual(GOOD_TARGET_PRODUCT_YAW_DEG, -90.0)
+        self.assertEqual(DEFECT_TARGET_PRODUCT_YAW_DEG, 0.0)
+        self.assertEqual(
+            self.controller._target_product_yaw_deg(R5_SORT_GOOD_DONE),
+            -90.0,
+        )
+        self.assertEqual(
+            self.controller._target_product_yaw_deg(R5_SORT_DEFECT_DONE),
+            0.0,
+        )
+
     def test_rigid_payload_pose_error_uses_all_seven_components(self):
         grasp = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]
         release = list(grasp)
@@ -605,6 +740,210 @@ class R5MotionGeometryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "seven values"):
             self.controller._pose_max_error(grasp[:6], release)
+
+    def test_wait_preposition_continues_to_pick_app(self):
+        plan = load_r5_plan()
+        paths = plan["paths"][R5_SORT_GOOD_DONE]
+
+        self.controller.set_pre_positioned(
+            R5_SORT_GOOD_DONE,
+            paths["home_to_wait"][-1],
+        )
+        label, path = self.controller._startup_path(
+            R5_SORT_GOOD_DONE,
+            paths,
+        )
+
+        self.assertEqual(label, "R5 wait_to_pick_app")
+        self.assertEqual(path, paths["wait_to_pick_app"])
+
+    def test_dynamic_paths_restore_wait_segments_for_a_wait_preposition(self):
+        plan = load_r5_plan()
+        full = plan["paths"][R5_SORT_GOOD_DONE]
+        dynamic = {
+            name: full[name]
+            for name in (
+                "initial_to_pick_app",
+                "pick_descend",
+                "lift_and_transfer",
+                "place_descend",
+                "return_home",
+            )
+        }
+
+        merged = self.controller._merge_wait_paths(
+            R5_SORT_GOOD_DONE,
+            dynamic,
+        )
+
+        self.assertEqual(merged["home_to_wait"], full["home_to_wait"])
+        self.assertEqual(merged["wait_to_pick_app"], full["wait_to_pick_app"])
+
+    def test_startup_path_uses_actual_wait_endpoint_over_stale_metadata(self):
+        plan = load_r5_plan()
+        paths = plan["paths"][R5_SORT_GOOD_DONE]
+
+        label, path = self.controller._startup_path(
+            R5_SORT_GOOD_DONE,
+            paths,
+            actual_config=paths["home_to_wait"][-1],
+        )
+
+        self.assertEqual(label, "R5 wait_to_pick_app")
+        self.assertEqual(path, paths["wait_to_pick_app"])
+
+    def test_r4_wait_preposition_continues_to_screw_app(self):
+        plan = load_r4_plan()
+        paths = plan["paths"]
+        controller = R4MotionController.__new__(R4MotionController)
+        controller._pre_positioned_config = paths["home_to_wait"][-1]
+
+        startup = controller._startup_paths(paths)
+
+        self.assertEqual(
+            startup,
+            [("R4 wait_to_screw_app", paths["wait_to_app"])],
+        )
+
+    def test_pick_app_preposition_skips_startup_path(self):
+        plan = load_r5_plan()
+        paths = plan["paths"][R5_SORT_GOOD_DONE]
+
+        self.controller.set_pre_positioned(
+            R5_SORT_GOOD_DONE,
+            paths["initial_to_pick_app"][-1],
+        )
+        label, path = self.controller._startup_path(
+            R5_SORT_GOOD_DONE,
+            paths,
+        )
+
+        self.assertIsNone(label)
+        self.assertIsNone(path)
+
+    def test_wait_preposition_uses_a_small_start_delay(self):
+        self.assertEqual(
+            self.controller._startup_delay_seconds("R5 wait_to_pick_app"),
+            WAIT_TO_PICK_APP_START_DELAY_S,
+        )
+        self.assertEqual(
+            self.controller._startup_delay_seconds("R5 initial_to_pick_app"),
+            0.0,
+        )
+
+    def test_good_place_descent_replays_user_taught_app_to_tcp(self):
+        plan = load_r5_plan()
+        place_descend = plan["paths"][R5_SORT_GOOD_DONE]["place_descend"]
+
+        self.assertEqual(len(place_descend), 11)
+        self.assertEqual(
+            [round(math.degrees(value), 6) for value in place_descend[0]],
+            [
+                -140.162165,
+                -30.199432,
+                -34.167019,
+                -15.177317,
+                75.018674,
+                -29.475511,
+            ],
+        )
+        self.assertEqual(
+            [round(math.degrees(value), 6) for value in place_descend[-1]],
+            [
+                -149.154622,
+                -39.727007,
+                -40.982372,
+                -6.330538,
+                89.225527,
+                -37.370645,
+            ],
+        )
+
+    def test_defect_place_descent_replays_user_taught_app_to_tcp(self):
+        plan = load_r5_plan()
+        paths = plan["paths"][R5_SORT_DEFECT_DONE]
+        place_descend = paths["place_descend"]
+
+        self.assertEqual(len(place_descend), 11)
+        self.assertEqual(
+            [round(math.degrees(value), 6) for value in place_descend[0]],
+            [
+                137.239791,
+                -38.02656,
+                -18.184261,
+                -22.933692,
+                80.637475,
+                159.444416,
+            ],
+        )
+        self.assertEqual(
+            [round(math.degrees(value), 6) for value in place_descend[-1]],
+            [
+                131.881614,
+                -44.796504,
+                -31.96695,
+                -11.115194,
+                88.705491,
+                154.422547,
+            ],
+        )
+        self.assertLessEqual(
+            max(
+                abs(a - b)
+                for a, b in zip(
+                    paths["lift_and_transfer"][-1],
+                    place_descend[0],
+                )
+            ),
+            math.radians(0.5),
+        )
+
+    def test_good_runtime_preturn_preserves_taught_path_when_disabled(self):
+        plan = load_r5_plan()
+        original = plan["paths"][R5_SORT_GOOD_DONE]
+        adjusted = R5MotionController._apply_good_transfer_joint6_preturn(
+            original
+        )
+
+        self.assertEqual(GOOD_TRANSFER_JOINT6_PRETURN_DEG, 0.0)
+        original_lift_delta = math.degrees(
+            original["lift_and_transfer"][-1][5]
+            - original["lift_and_transfer"][0][5]
+        )
+        adjusted_lift_delta = math.degrees(
+            adjusted["lift_and_transfer"][-1][5]
+            - adjusted["lift_and_transfer"][0][5]
+        )
+        original_place_delta = math.degrees(
+            original["place_descend"][-1][5]
+            - original["place_descend"][0][5]
+        )
+        adjusted_place_delta = math.degrees(
+            adjusted["place_descend"][-1][5]
+            - adjusted["place_descend"][0][5]
+        )
+
+        self.assertAlmostEqual(
+            adjusted_lift_delta,
+            original_lift_delta - GOOD_TRANSFER_JOINT6_PRETURN_DEG,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            adjusted_place_delta,
+            original_place_delta + GOOD_TRANSFER_JOINT6_PRETURN_DEG,
+            places=6,
+        )
+        self.assertLessEqual(
+            max(
+                abs(a - b)
+                for a, b in zip(
+                    adjusted["lift_and_transfer"][-1],
+                    adjusted["place_descend"][0],
+                )
+            ),
+            math.radians(0.5),
+        )
+        self.assertEqual(GOOD_RELEASE_CENTERING_OFFSET_M, (0.0, 0.0, 0.0))
 
 
 if __name__ == "__main__":

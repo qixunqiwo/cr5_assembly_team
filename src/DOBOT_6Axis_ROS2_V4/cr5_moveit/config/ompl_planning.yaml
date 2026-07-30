@@ -45,11 +45,6 @@ planner_configs:
     type: geometric::PRMstar
   BITstar:
     type: geometric::BITstar
-  InformedRRTstar:
-    type: geometric::InformedRRTstar
-    range: 0.0
-    goal_bias: 0.05
-    delay_collision_checking: 1
 
 cr5_group:
   planner_configs:
@@ -60,6 +55,5 @@ cr5_group:
     - LBTRRT
     - PRMstar
     - BITstar
-    - InformedRRTstar
   projection_evaluator: joints(joint1,joint2)
   longest_valid_segment_fraction: 0.005

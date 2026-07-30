@@ -1,9 +1,11 @@
 """Validated R2 PCB motion for the five-CR5A CoppeliaSim cell.
 
 R2 installs the real ``PCB_Supply`` into the real box left by
-``R1_BOX_PLACED``.  The saved scene has no R2 vacuum-tool geometry, so this
-visual milestone creates a runtime-only TCP 100 mm ahead of Link6 and attaches
-the PCB to it.  The four Git APP/TCP targets are checked but never modified.
+``R1_BOX_PLACED``.  The checked-in plan contains R2 joint-space samples
+generated from RViz/MoveIt targets in the robot-relative frame, then
+regenerated with a level suction orientation that keeps the suction plate axes
+parallel to the PCB's initial long/short axes.  Grasping is a visual suction
+attach operation; this module does not claim physical suction validation.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import bisect
 import hashlib
 import itertools
+import json
 import math
 import threading
 from pathlib import Path
@@ -19,13 +22,15 @@ from typing import Any, Optional
 from robot_control.r1_motion import PLAN_PATH as R1_PLAN_PATH
 from robot_control.r1_motion import load_r1_plan
 from sim_bridge.coppelia_client import SimBridge
-from sim_bridge.scene_objects import PARTS, ROBOT_BASES, WORKSPACES
+from sim_bridge.scene_objects import PARTS, ROBOT_BASES, ROBOT_TIPS, WORKSPACES
 
 
 R2_PCB_PLACED = "R2_PCB_PLACED"
 R2_ACTIONS = frozenset({R2_PCB_PLACED})
 
-SCENE_NAME = "five_cr5a_cell.ttt"
+PLAN_VERSION = 1
+PLAN_PATH = Path(__file__).with_name("plans") / "r2_pcb_cycle_plan.json"
+SCENE_NAME = "compact_cell1ttt.ttt"
 ROBOT_ID = "R2"
 TARGET_NAMES = (
     "R2_PCB_PICK_APP",
@@ -35,40 +40,57 @@ TARGET_NAMES = (
 )
 PROTECTED_TARGETS = {
     "R2_PCB_PICK_APP": {
-        "position": [-1.28, -0.28, 0.45],
+        "position": [-1.22, -0.42, 0.416],
         "orientation_euler": [0.0, 0.0, 0.0],
     },
     "R2_PCB_PICK_TCP": {
-        "position": [-1.28, -0.28, 0.22],
+        "position": [-1.22, -0.42, 0.236],
         "orientation_euler": [0.0, 0.0, 0.0],
     },
     "R2_PCB_PLACE_APP": {
-        "position": [-1.15, 0.20, 0.50],
+        "position": [-1.08, 0.12, 0.4704],
         "orientation_euler": [0.0, 0.0, 0.0],
     },
     "R2_PCB_PLACE_TCP": {
-        "position": [-1.15, 0.20, 0.29],
+        "position": [-1.08, 0.12, 0.2904],
         "orientation_euler": [0.0, 0.0, 0.0],
     },
 }
 
-RUNTIME_ORIENTATION_DEG = (195.0, 0.0, 90.0)
+RUNTIME_ORIENTATION_DEG = (0.0, 0.0, 180.0)
 RUNTIME_ORIENTATION = tuple(
     math.radians(value) for value in RUNTIME_ORIENTATION_DEG
 )
-VIRTUAL_TCP_OFFSET_M = 0.100
+NATIVE_TCP_OFFSET_M = 0.124
+RUNTIME_ATTACH_TCP_OFFSET_M = 0.0
 PCB_VISUAL_OFFSET_Z = 0.052
 
-BOX_ASSEMBLY_POSITION = (-1.150002, 0.199900, 0.215915)
-PCB_SUPPLY_POSITION = (-1.280000, -0.280000, 0.160000)
+BOX_ASSEMBLY_POSITION = (-1.078563, 0.120898, 0.21946)
+PCB_SUPPLY_POSITION = (-1.22, -0.42, 0.1584)
+PCB_RELEASE_ORIENTATION = (0.0, 0.0, 0.0)
 POSITION_TOLERANCE_M = 0.002
 JOINT_TOLERANCE_DEG = 0.30
 TARGET_TOLERANCE = 1e-6
 WORKSPACE_TOLERANCE_M = 0.003
 
 TRANSFER_SPEED_DEG_S = 50.0
-DESCENT_SPEED_CAP_DEG_S = 24.0
+INITIAL_APPROACH_SPEED_MULTIPLIER = 2.4
+DESCENT_SPEED_CAP_DEG_S = 36.0
 HOLD_SECONDS = 0.8
+
+REQUIRED_PATHS = (
+    "initial_to_pick_app",
+    "pick_descend",
+    "lift_and_transfer",
+    "place_descend",
+    "return_home",
+)
+COORDINATED_SAFE_WAIT_PATHS = (
+    "pick_tcp_to_safe_wait",
+    "safe_wait_to_place_app",
+)
+MAX_PATH_BOUNDARY_JUMP_RAD = 1e-4
+MAX_UNWRAPPED_JOINT_RAD = 2.0 * math.pi + 1e-6
 
 RUNTIME_BRIDGE_ALIAS = "R2_Runtime_Command_Bridge"
 RUNTIME_BRIDGE_CODE = """function sysCall_init()
@@ -98,10 +120,182 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _finite_joint_path(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) >= 2
+        and all(
+            isinstance(config, list)
+            and len(config) == 6
+            and all(math.isfinite(float(joint)) for joint in config)
+            for config in value
+        )
+    )
+
+
+def _max_joint_gap(first: list[float], second: list[float]) -> float:
+    return max(abs(a - b) for a, b in zip(first, second))
+
+
+def _path_has_invalid_joint_branch(configs: list[list[float]]) -> bool:
+    if any(
+        abs(float(joint)) > MAX_UNWRAPPED_JOINT_RAD
+        for config in configs
+        for joint in config
+    ):
+        return True
+    return any(
+        _max_joint_gap(first, second) > math.pi
+        for first, second in zip(configs, configs[1:])
+    )
+
+
+def load_r2_plan(path: Path = PLAN_PATH) -> dict[str, Any]:
+    """Load and structurally validate the R2 replay plan."""
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot load R2 plan {path}: {exc}") from exc
+
+    if plan.get("plan_version") != PLAN_VERSION:
+        raise RuntimeError(f"unsupported R2 plan version in {path}")
+    if plan.get("protected_targets_modified") is not False:
+        raise RuntimeError("R2 plan does not preserve the protected Git targets")
+    if plan.get("suction_orientation_world_euler_deg") != list(
+        RUNTIME_ORIENTATION_DEG
+    ):
+        raise RuntimeError("R2 suction runtime orientation is not validated")
+
+    alignment = plan.get("suction_alignment", {})
+    if alignment.get("plate_horizontal") is not True:
+        raise RuntimeError("R2 suction plate is not marked horizontal")
+    if alignment.get("long_short_edges_swapped") is not False:
+        raise RuntimeError("R2 suction plate swaps PCB long/short axes")
+
+    protected = plan.get("protected_targets")
+    if not isinstance(protected, dict) or set(protected) != set(TARGET_NAMES):
+        raise RuntimeError("R2 plan target snapshot is incomplete")
+    paths = plan.get("paths")
+    if not isinstance(paths, dict):
+        raise RuntimeError("R2 plan has no paths")
+    for name in REQUIRED_PATHS:
+        if not _finite_joint_path(paths.get(name)):
+            raise RuntimeError(f"R2 plan path is invalid: {name}")
+        if _path_has_invalid_joint_branch(paths[name]):
+            raise RuntimeError(f"R2 plan uses an invalid joint branch: {name}")
+    for name in COORDINATED_SAFE_WAIT_PATHS:
+        if not _finite_joint_path(paths.get(name)):
+            raise RuntimeError(f"R2 coordinated safe-wait path is invalid: {name}")
+        if _path_has_invalid_joint_branch(paths[name]):
+            raise RuntimeError(
+                f"R2 coordinated safe-wait path uses an invalid branch: {name}"
+            )
+    for first_name, second_name in zip(REQUIRED_PATHS, REQUIRED_PATHS[1:]):
+        if (
+            _max_joint_gap(paths[first_name][-1], paths[second_name][0])
+            > MAX_PATH_BOUNDARY_JUMP_RAD
+        ):
+            raise RuntimeError(
+                "R2 plan path boundary jumps: "
+                f"{first_name} -> {second_name}"
+            )
+    for first_name, second_name in (
+        ("pick_descend", "pick_tcp_to_safe_wait"),
+        ("pick_tcp_to_safe_wait", "safe_wait_to_place_app"),
+    ):
+        if (
+            _max_joint_gap(paths[first_name][-1], paths[second_name][0])
+            > MAX_PATH_BOUNDARY_JUMP_RAD
+        ):
+            raise RuntimeError(
+                "R2 coordinated safe-wait path boundary jumps: "
+                f"{first_name} -> {second_name}"
+            )
+
+    endpoints = plan.get("endpoints_rad", {})
+    for endpoint in ("pick_app", "pick_tcp", "place_app", "place_tcp"):
+        value = endpoints.get(endpoint)
+        if (
+            not isinstance(value, list)
+            or len(value) != 6
+            or not all(math.isfinite(float(joint)) for joint in value)
+        ):
+            raise RuntimeError(f"R2 plan endpoint is invalid: {endpoint}")
+
+    if (
+        _max_joint_gap(paths["initial_to_pick_app"][-1], endpoints["pick_app"])
+        > MAX_PATH_BOUNDARY_JUMP_RAD
+    ):
+        raise RuntimeError("R2 pick APP endpoint differs from initial path")
+    if (
+        _max_joint_gap(paths["pick_descend"][-1], endpoints["pick_tcp"])
+        > MAX_PATH_BOUNDARY_JUMP_RAD
+    ):
+        raise RuntimeError("R2 pick TCP endpoint differs from descend path")
+    if (
+        _max_joint_gap(paths["lift_and_transfer"][-1], endpoints["place_app"])
+        > MAX_PATH_BOUNDARY_JUMP_RAD
+    ):
+        raise RuntimeError("R2 place APP endpoint differs from transfer path")
+    if (
+        _max_joint_gap(paths["safe_wait_to_place_app"][-1], endpoints["place_app"])
+        > MAX_PATH_BOUNDARY_JUMP_RAD
+    ):
+        raise RuntimeError("R2 coordinated safe-wait path does not end at place APP")
+    if (
+        _max_joint_gap(paths["place_descend"][-1], endpoints["place_tcp"])
+        > MAX_PATH_BOUNDARY_JUMP_RAD
+    ):
+        raise RuntimeError("R2 place TCP endpoint differs from descend path")
+    if (
+        _max_joint_gap(paths["return_home"][-1], endpoints["pick_app"])
+        > MAX_PATH_BOUNDARY_JUMP_RAD
+    ):
+        raise RuntimeError("R2 final standby is not pick APP")
+
+    workspace = plan.get("workspace", {})
+    expected_workspace = WORKSPACES["R2"]
+    if tuple(workspace.get("lower", ())) != tuple(expected_workspace["lower"]):
+        raise RuntimeError("R2 plan lower workspace wall differs from the contract")
+    if tuple(workspace.get("upper", ())) != tuple(expected_workspace["upper"]):
+        raise RuntimeError("R2 plan upper workspace wall differs from the contract")
+    shared = workspace.get("assembly_shared", {})
+    expected_shared = WORKSPACES["ASSEMBLY_SHARED"]
+    if tuple(shared.get("lower", ())) != tuple(expected_shared["lower"]):
+        raise RuntimeError("R2 plan shared-zone lower bound differs from the contract")
+    if tuple(shared.get("upper", ())) != tuple(expected_shared["upper"]):
+        raise RuntimeError("R2 plan shared-zone upper bound differs from the contract")
+
+    validation = plan.get("validation", {})
+    fingerprint = validation.get("scene_fingerprint", {})
+    if not isinstance(fingerprint.get("sha256"), str) or not isinstance(
+        fingerprint.get("size"), int
+    ):
+        raise RuntimeError("R2 plan has no validated scene fingerprint")
+    if validation.get("native_tcp_offset_m") != NATIVE_TCP_OFFSET_M:
+        raise RuntimeError("R2 plan does not use the native suction TCP")
+    if (
+        validation.get("return_home_semantics")
+        != "place_tcp_lift_to_place_app_then_transfer_to_pick_app_standby"
+    ):
+        raise RuntimeError("R2 return-home semantics are not the standby plan")
+    return plan
+
+
 def _near(first: list[float], second: list[float], tolerance: float) -> bool:
     return len(first) == len(second) and max(
         abs(a - b) for a, b in zip(first, second)
     ) <= tolerance
+
+
+def _set_world_pose(
+    sim: Any,
+    handle: int,
+    position: tuple[float, float, float],
+    orientation: tuple[float, float, float],
+) -> None:
+    sim.setObjectPosition(handle, -1, list(position))
+    sim.setObjectOrientation(handle, -1, list(orientation))
 
 
 def _find_alias(sim: Any, root: int, alias: str) -> int:
@@ -611,6 +805,7 @@ class R2MotionController:
         self,
         bridge: SimBridge,
         r1_plan_path: Path = R1_PLAN_PATH,
+        r2_plan_path: Path = PLAN_PATH,
         assembly_lock: Optional[threading.Lock] = None,
         speed_deg_s: float = TRANSFER_SPEED_DEG_S,
         hold_seconds: float = HOLD_SECONDS,
@@ -621,6 +816,7 @@ class R2MotionController:
             raise ValueError("speed_deg_s must be positive")
         self.bridge = bridge
         self.r1_plan_path = Path(r1_plan_path)
+        self.r2_plan_path = Path(r2_plan_path)
         self.assembly_lock = assembly_lock or threading.Lock()
         self.speed_deg_s = float(speed_deg_s)
         self.hold_seconds = max(0.0, float(hold_seconds))
@@ -629,6 +825,7 @@ class R2MotionController:
         self._prepared_paths: Optional[dict[str, list[list[float]]]] = None
         self._pre_positioned_config: Optional[list[float]] = None
         self._continuous_stepping = False
+        self._coordinated_mode = False
 
     def _target_snapshot(self) -> dict[str, dict[str, list[float]]]:
         result = {}
@@ -647,14 +844,22 @@ class R2MotionController:
 
     def _validate_static(self) -> dict[str, Any]:
         r1_plan = load_r1_plan(self.r1_plan_path)
+        r2_plan = load_r2_plan(self.r2_plan_path)
         scene = Path(self.bridge.scene_path())
         if scene.name != SCENE_NAME:
             raise RuntimeError(f"unexpected CoppeliaSim scene: {scene}")
-        fingerprint = r1_plan["validation"]["scene_fingerprint"]
-        if scene.stat().st_size != int(fingerprint.get("size", -1)):
-            raise RuntimeError("R2 scene size differs; repeat full preflight")
-        if _sha256(scene) != fingerprint["sha256"]:
-            raise RuntimeError("R2 scene hash differs; repeat full preflight")
+        scene_sha256 = _sha256(scene)
+        scene_size = scene.stat().st_size
+        for label, plan in (("R1", r1_plan), ("R2", r2_plan)):
+            fingerprint = plan["validation"]["scene_fingerprint"]
+            if scene_size != int(fingerprint.get("size", -1)):
+                raise RuntimeError(
+                    f"{label} scene size differs; repeat full preflight"
+                )
+            if scene_sha256 != fingerprint["sha256"]:
+                raise RuntimeError(
+                    f"{label} scene hash differs; repeat full preflight"
+                )
 
         current_targets = self._target_snapshot()
         for name, expected in PROTECTED_TARGETS.items():
@@ -684,18 +889,19 @@ class R2MotionController:
             else load_r1_plan(self.r1_plan_path)
         )
 
-        r1_expected = r1_plan["paths"][
-            "box_retreat_and_terminal_approach"
-        ][-1]
-        if not _near(
-            self.bridge.get_robot_joint_positions("R1"),
-            r1_expected,
-            math.radians(JOINT_TOLERANCE_DEG),
-        ):
-            raise RuntimeError(
-                "R1 has not exited the assembly zone to "
-                "R1_TERMINAL_PICK_APP"
-            )
+        if not self._coordinated_mode:
+            r1_expected = r1_plan["paths"][
+                "box_retreat_and_terminal_approach"
+            ][-1]
+            if not _near(
+                self.bridge.get_robot_joint_positions("R1"),
+                r1_expected,
+                math.radians(JOINT_TOLERANCE_DEG),
+            ):
+                raise RuntimeError(
+                    "R1 has not exited the assembly zone to "
+                    "R1_TERMINAL_PICK_APP"
+                )
         expected_r2 = (
             self._pre_positioned_config
             if self._pre_positioned_config is not None
@@ -712,10 +918,10 @@ class R2MotionController:
             )
 
         parts = sim.getObject(f"{PARTS['BOX_BLANK'].rsplit('/', 1)[0]}")
-        for object_name, expected_position in (
-            ("BOX_BLANK", BOX_ASSEMBLY_POSITION),
-            ("PCB_SUPPLY", PCB_SUPPLY_POSITION),
-        ):
+        checks = [("PCB_SUPPLY", PCB_SUPPLY_POSITION)]
+        if not self._coordinated_mode:
+            checks.insert(0, ("BOX_BLANK", BOX_ASSEMBLY_POSITION))
+        for object_name, expected_position in checks:
             handle = self.bridge.get_object_handle(object_name)
             if sim.getObjectParent(handle) != parts:
                 raise RuntimeError(f"{object_name} is not owned by /Parts")
@@ -737,6 +943,34 @@ class R2MotionController:
                 )
         return r1_plan
 
+    def _validate_box_ready_for_place(self) -> None:
+        sim = self.bridge.sim
+        parts = sim.getObject(f"{PARTS['BOX_BLANK'].rsplit('/', 1)[0]}")
+        box = self.bridge.get_object_handle("BOX_BLANK")
+        if sim.getObjectParent(box) != parts:
+            raise RuntimeError("BOX_BLANK is not owned by /Parts")
+        actual_position = [
+            float(value) for value in sim.getObjectPosition(box, -1)
+        ]
+        if not _near(
+            actual_position,
+            list(BOX_ASSEMBLY_POSITION),
+            POSITION_TOLERANCE_M,
+        ):
+            raise RuntimeError(
+                "R2 coordinated place cannot start before R1 has placed the box"
+            )
+
+    def _load_planned_paths(self) -> dict[str, list[list[float]]]:
+        plan = load_r2_plan(self.r2_plan_path)
+        return {
+            name: [
+                [float(joint) for joint in config]
+                for config in plan["paths"][name]
+            ]
+            for name in (*REQUIRED_PATHS, *COORDINATED_SAFE_WAIT_PATHS)
+        }
+
     def prepare(self, action: str = R2_PCB_PLACED) -> dict[str, Any]:
         if action not in R2_ACTIONS:
             raise ValueError(f"unsupported R2 action: {action}")
@@ -750,20 +984,7 @@ class R2MotionController:
             math.radians(JOINT_TOLERANCE_DEG),
         ):
             raise RuntimeError("R2 is not zero during preparation")
-        client = getattr(self.bridge, "_client", None)
-        if client is None:
-            raise RuntimeError("CoppeliaSim remote client is unavailable")
-        sim_ik = client.require("simIK")
-        robot = self.bridge.get_object_handle(ROBOT_ID)
-        joints = self.bridge.get_robot_joint_handles(ROBOT_ID)
-        virtual_tip = self._create_virtual_tcp(robot)
-        try:
-            prepared_paths = self._build_paths(
-                sim_ik, robot, virtual_tip, joints
-            )
-        finally:
-            sim.removeObjects([virtual_tip])
-        self._prepared_paths = prepared_paths
+        self._prepared_paths = self._load_planned_paths()
         return {
             "robot_id": ROBOT_ID,
             "prepared_actions": [R2_PCB_PLACED],
@@ -774,6 +995,9 @@ class R2MotionController:
 
     def set_continuous_stepping(self, enabled: bool) -> None:
         self._continuous_stepping = bool(enabled)
+
+    def set_coordinated_mode(self, enabled: bool) -> None:
+        self._coordinated_mode = bool(enabled)
 
     def set_pre_positioned(self, action: str, config: list[float]) -> None:
         """Record the joint config set by ``_preposition_robots()``.
@@ -786,15 +1010,22 @@ class R2MotionController:
 
     def _create_virtual_tcp(self, robot: int) -> int:
         sim = self.bridge.sim
-        original_tip = _find_alias(sim, robot, "R2_gripper_tip")
-        parent = sim.getObjectParent(original_tip)
+        original_tip = _find_alias(sim, robot, ROBOT_TIPS["R2"])
         virtual_tip = sim.createDummy(0.004)
-        sim.setObjectAlias(virtual_tip, "R2_Runtime_Vacuum_TCP")
-        sim.setObjectParent(virtual_tip, parent, False)
+        sim.setObjectAlias(virtual_tip, "R2_Runtime_Attach_TCP")
+        sim.setObjectParent(virtual_tip, original_tip, False)
         sim.setObjectPose(
             virtual_tip,
-            parent,
-            [0.0, 0.0, VIRTUAL_TCP_OFFSET_M, 0.0, 0.0, 0.0, 1.0],
+            original_tip,
+            [
+                0.0,
+                0.0,
+                RUNTIME_ATTACH_TCP_OFFSET_M,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ],
         )
         sim.setObjectInt32Param(
             virtual_tip, sim.objintparam_visibility_layer, 0
@@ -953,14 +1184,7 @@ class R2MotionController:
             if self._prepared_paths is not None:
                 paths = self._prepared_paths
             else:
-                client = getattr(self.bridge, "_client", None)
-                if client is None:
-                    raise RuntimeError(
-                        "CoppeliaSim remote client is unavailable"
-                    )
-                paths = self._build_paths(
-                    client.require("simIK"), robot, virtual_tip, joints
-                )
+                paths = self._load_planned_paths()
 
             original_max_velocities = [
                 sim.getObjectFloatParam(
@@ -969,13 +1193,24 @@ class R2MotionController:
                 for joint in joints
             ]
             max_velocity = math.radians(
-                max(60.0, self.speed_deg_s * 1.35)
+                max(
+                    60.0,
+                    self.speed_deg_s
+                    * INITIAL_APPROACH_SPEED_MULTIPLIER
+                    * 1.35,
+                )
             )
             for joint in joints:
                 sim.setObjectFloatParam(
                     joint, sim.jointfloatparam_maxvel, max_velocity
                 )
-                sim.setJointTargetPosition(joint, 0.0)
+            start_targets = (
+                self._pre_positioned_config
+                if self._pre_positioned_config is not None
+                else [0.0] * 6
+            )
+            for joint, target in zip(joints, start_targets):
+                sim.setJointTargetPosition(joint, float(target))
 
             command_script = self._create_command_script(robot)
             if not self.bridge.start_simulation():
@@ -994,6 +1229,9 @@ class R2MotionController:
             if prepared_mode:
                 runner.step("R2 runtime bridge initialized", force_full=True)
             transfer_speed = math.radians(self.speed_deg_s)
+            initial_approach_speed = math.radians(
+                self.speed_deg_s * INITIAL_APPROACH_SPEED_MULTIPLIER
+            )
             descent_speed = math.radians(
                 min(self.speed_deg_s * 0.75, DESCENT_SPEED_CAP_DEG_S)
             )
@@ -1004,7 +1242,7 @@ class R2MotionController:
                 runner.execute_path(
                     "R2 initial_to_pick_app",
                     paths["initial_to_pick_app"],
-                    transfer_speed,
+                    initial_approach_speed,
                 )
                 runner.hold(self.hold_seconds, "R2 hold above PCB")
             # else: pre-positioned at pick APP — skip the initial approach
@@ -1027,12 +1265,28 @@ class R2MotionController:
                     "R2 PCB visual offset", force_collision=True
                 )
 
-            with self.assembly_lock:
+            if self._coordinated_mode:
                 runner.execute_path(
-                    "R2 lift_and_transfer",
-                    paths["lift_and_transfer"],
+                    "R2 pick_tcp_to_safe_wait",
+                    paths["pick_tcp_to_safe_wait"],
                     transfer_speed,
                 )
+                runner.hold(self.hold_seconds, "R2 hold at PCB safe wait")
+
+            with self.assembly_lock:
+                if self._coordinated_mode:
+                    self._validate_box_ready_for_place()
+                    runner.execute_path(
+                        "R2 safe_wait_to_place_app",
+                        paths["safe_wait_to_place_app"],
+                        transfer_speed,
+                    )
+                else:
+                    runner.execute_path(
+                        "R2 lift_and_transfer",
+                        paths["lift_and_transfer"],
+                        transfer_speed,
+                    )
                 runner.hold(self.hold_seconds, "R2 hold above box")
                 runner.execute_path(
                     "R2 descend_to_place_tcp",
@@ -1040,34 +1294,50 @@ class R2MotionController:
                     descent_speed,
                 )
 
+                _set_world_pose(
+                    sim,
+                    pcb,
+                    PCB_ASSEMBLY_POSITION,
+                    PCB_RELEASE_ORIENTATION,
+                )
                 sim.setObjectParent(pcb, parts, True)
                 attached = False
                 runner.set_payload(None)
-                runner.step("R2 PCB detached", force_full=True)
+                _set_world_pose(
+                    sim,
+                    pcb,
+                    PCB_ASSEMBLY_POSITION,
+                    PCB_RELEASE_ORIENTATION,
+                )
+                runner.step("R2 PCB detached at canonical pose", force_full=True)
                 runner.execute_path(
-                    "R2 retreat_and_return_home",
+                    "R2 retreat_to_pick_app_standby",
                     paths["return_home"],
                     transfer_speed,
                 )
-            runner.hold(0.4, "R2 final home hold")
+            runner.hold(0.4, "R2 final PICK_APP standby hold")
 
             final_joints = runner.joint_positions()
+            expected_final = paths["return_home"][-1]
             if not _near(
                 final_joints,
-                [0.0] * 6,
+                expected_final,
                 math.radians(JOINT_TOLERANCE_DEG),
             ):
-                raise RuntimeError("R2 did not return to the validated zero state")
+                raise RuntimeError("R2 did not return to PICK_APP standby")
             result = {
                 "action": action,
                 "visual_suction_only": True,
                 "runtime_orientation_deg": list(RUNTIME_ORIENTATION_DEG),
-                "virtual_tcp_offset_m": VIRTUAL_TCP_OFFSET_M,
+                "native_tcp_offset_m": NATIVE_TCP_OFFSET_M,
+                "runtime_attach_tcp_offset_m": RUNTIME_ATTACH_TCP_OFFSET_M,
                 "pcb_visual_offset_m": PCB_VISUAL_OFFSET_Z,
                 "final_joint_positions_deg": [
                     round(math.degrees(value), 6)
                     for value in final_joints
                 ],
+                "final_standby": "R2_PCB_PICK_APP",
+                "coordinated_safe_wait_used": self._coordinated_mode,
                 "pcb_position": [
                     round(float(value), 6)
                     for value in sim.getObjectPosition(pcb, -1)
@@ -1121,4 +1391,10 @@ class R2MotionController:
                         pass
 
 
-__all__ = ["R2_ACTIONS", "R2_PCB_PLACED", "R2MotionController"]
+__all__ = [
+    "PLAN_PATH",
+    "R2_ACTIONS",
+    "R2_PCB_PLACED",
+    "R2MotionController",
+    "load_r2_plan",
+]

@@ -23,7 +23,7 @@ class IntegratedRobotExecutor(IRobotExecutor):
         executor: Optional[RobotExecutor] = None,
         quality_resolver: Optional[Callable[[str], str]] = None,
         speed_deg_s: float = 50.0,
-        hold_seconds: float = 0.8,
+        hold_seconds: float = 1.0,
         motion_monitor_factory: Optional[Callable[[str], object]] = None,
     ):
         self.bridge = bridge or SimBridge()
@@ -42,7 +42,16 @@ class IntegratedRobotExecutor(IRobotExecutor):
         self._previous_task_end_simulation_s: Optional[float] = None
 
     def _ensure_connected(self) -> None:
-        if not self.bridge.is_connected() and not self.bridge.connect():
+        if self.bridge.is_connected():
+            return
+        host = getattr(self.bridge, "host", None)
+        port = getattr(self.bridge, "port", None)
+        connected = (
+            self.bridge.connect(host, port)
+            if host is not None and port is not None
+            else self.bridge.connect()
+        )
+        if not connected:
             raise RuntimeError(
                 self.bridge.last_error or "cannot connect to CoppeliaSim"
             )
@@ -55,16 +64,37 @@ class IntegratedRobotExecutor(IRobotExecutor):
             return None
 
     def prepare_cycle(
-        self, quality: str = "good", preload_both_r5: bool = False
+        self,
+        quality: str = "good",
+        preload_both_r5: bool = False,
+        preposition_front_half: bool = False,
     ) -> dict:
         prepare_monitor = getattr(self.motion_monitor_factory, "prepare", None)
         if prepare_monitor is not None:
             prepare_monitor()
         evidence = self.executor.prepare_cycle(
-            quality=quality, preload_both_r5=preload_both_r5
+            quality=quality,
+            preload_both_r5=preload_both_r5,
+            preposition_front_half=preposition_front_half,
         )
         with self._timing_lock:
             self._previous_task_end_simulation_s = None
+        return evidence
+
+    def execute_coordinated_front_half(
+        self,
+        quality: str = "good",
+        order_id: str = "FIVE-ARM-DEMO",
+    ) -> dict:
+        evidence = self.executor.execute_coordinated_front_half(
+            quality=quality,
+            order_id=order_id,
+        )
+        with self._timing_lock:
+            if evidence.get("tasks"):
+                self._previous_task_end_simulation_s = evidence["tasks"][-1][
+                    "end_simulation_time_s"
+                ]
         return evidence
 
     def close(self) -> None:
@@ -113,8 +143,12 @@ class IntegratedRobotExecutor(IRobotExecutor):
             monitor_start_error = str(exc)
         camera = None
         try:
-            camera = self._prepare_camera(task)
             result = self.executor.execute_task(task)
+            if (
+                task.target_point == R4_SCREW_DONE
+                and result.status == TaskStatus.FINISHED.value
+            ):
+                camera = self._prepare_camera(task)
         except Exception as exc:
             now = time.time()
             result = TaskResult(

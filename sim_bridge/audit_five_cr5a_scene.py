@@ -26,11 +26,16 @@ from sim_bridge.scene_objects import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SCENE = REPO_ROOT / "scenes" / "five_cr5a_cell.ttt"
+DEFAULT_SCENE = REPO_ROOT / "scenes" / "compact_cell1ttt.ttt"
 DEFAULT_BASELINE = (
     REPO_ROOT / "configs" / "five_cr5a_scene_audit_baseline.json"
 )
-SCRIPT_DUMMIES = ("Main_Cell_Generator", "ROS2_All_Robot_Bridge")
+SCRIPT_MARKERS = (
+    "Product_Stage_Controller_60.lua",
+    "Step02B_Tool_Action_Controller",
+    "ROS2_CompactCell_Bridge_V2_GlobalCallbacks.lua",
+    "ROS2_Joint_Jog_Controller_R1_R5.lua",
+)
 RUNTIME_MARKERS = ("Runtime", "Candidate", "Command_Bridge")
 
 
@@ -274,13 +279,20 @@ def build_audit(
     all_scene_objects = list(
         sim.getObjectsInTree(sim.handle_scene, sim.handle_all, 0)
     )
-    alias_counts = {
-        alias: sum(sim.getObjectAlias(handle) == alias for handle in all_scene_objects)
-        for alias in SCRIPT_DUMMIES
+    scene_scripts = list(
+        sim.getObjectsInTree(sim.handle_scene, sim.object_script_type, 0)
+    )
+    script_texts = [
+        sim.getScriptStringParam(handle, sim.scriptstringparam_text)
+        for handle in scene_scripts
+    ]
+    script_marker_counts = {
+        marker: sum(marker in text for text in script_texts)
+        for marker in SCRIPT_MARKERS
     }
-    for alias, count in alias_counts.items():
+    for marker, count in script_marker_counts.items():
         if count != 1:
-            errors.append(f"expected one {alias}, found {count}")
+            errors.append(f"expected one script containing {marker}, found {count}")
 
     joint_tolerance = float(baseline["tolerances"]["joint_deg"])
     robots = {
@@ -312,7 +324,7 @@ def build_audit(
     protected_changes = [change for change in target_changes if change["protected"]]
     if protected_changes:
         errors.append(
-            "protected R1/R2/R4 targets changed without an accepted baseline update"
+            "protected HOME/APP/TCP targets changed without an accepted baseline update"
         )
     if any(not change["protected"] for change in target_changes):
         warnings.append("R3/R5/sensor targets changed; recalibration required")
@@ -429,7 +441,7 @@ def build_audit(
             "fingerprint_changed": fingerprint_changed,
             "cell_object_count": cell_count,
             "target_tree_dummy_count": target_count,
-            "script_dummy_counts": alias_counts,
+            "script_marker_counts": script_marker_counts,
         },
         "robots": robots,
         "target_changes": target_changes,

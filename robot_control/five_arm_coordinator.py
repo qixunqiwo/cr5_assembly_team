@@ -31,7 +31,7 @@ class FiveArmCoordinator:
         bridge: Optional[SimBridge] = None,
         executor: Optional[RobotExecutor] = None,
         speed_deg_s: float = 50.0,
-        hold_seconds: float = 0.8,
+        hold_seconds: float = 1.0,
         motion_monitor_factory=None,
     ):
         self.bridge = bridge or SimBridge()
@@ -120,10 +120,18 @@ class FiveArmCoordinator:
     ) -> dict[str, Any]:
         quality = quality.strip().lower()
         tasks = self._sequence(quality, order_id)
-        if not self.bridge.is_connected() and not self.bridge.connect():
-            raise RuntimeError(
-                self.bridge.last_error or "cannot connect to CoppeliaSim"
+        if not self.bridge.is_connected():
+            host = getattr(self.bridge, "host", None)
+            port = getattr(self.bridge, "port", None)
+            connected = (
+                self.bridge.connect(host, port)
+                if host is not None and port is not None
+                else self.bridge.connect()
             )
+            if not connected:
+                raise RuntimeError(
+                    self.bridge.last_error or "cannot connect to CoppeliaSim"
+                )
 
         scene = Path(self.bridge.scene_path())
         started_wall = time.time()
@@ -137,10 +145,29 @@ class FiveArmCoordinator:
             "camera": None,
         }
         previous_end_sim: Optional[float] = None
+        front_half_failed = False
         try:
-            for task in tasks:
-                if task.target_point == R4_SCREW_DONE:
-                    evidence["camera"] = self._set_camera_result(quality)
+            remaining_tasks = tasks
+            coordinated_front_half = getattr(
+                self.executor, "execute_coordinated_front_half", None
+            )
+            if callable(coordinated_front_half):
+                front = coordinated_front_half(quality, order_id)
+                evidence["tasks"].extend(front.get("tasks", []))
+                if evidence["tasks"]:
+                    previous_end_sim = evidence["tasks"][-1][
+                        "end_simulation_time_s"
+                    ]
+                if front.get("status") != "finished":
+                    evidence["status"] = "failed"
+                    front_half_failed = True
+                    evidence["failed_action"] = front.get("failed_action")
+                    evidence["front_half_errors"] = front.get("errors", {})
+                    remaining_tasks = []
+                else:
+                    remaining_tasks = tasks[5:]
+
+            for task in remaining_tasks:
                 start_wall = time.time()
                 start_sim = self._simulation_time()
                 record: dict[str, Any] = {
@@ -217,8 +244,11 @@ class FiveArmCoordinator:
                     evidence["status"] = "failed"
                     evidence["failed_action"] = task.target_point
                     break
+                if task.target_point == R4_SCREW_DONE:
+                    evidence["camera"] = self._set_camera_result(quality)
             else:
-                evidence["status"] = "finished"
+                if not front_half_failed:
+                    evidence["status"] = "finished"
         except Exception as exc:
             evidence["status"] = "failed"
             evidence["error"] = str(exc)

@@ -22,7 +22,7 @@ from sim_bridge.scene_objects import PARTS, ROBOT_BASES
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SCENE = REPO_ROOT / "scenes" / "five_cr5a_cell.ttt"
+DEFAULT_SCENE = REPO_ROOT / "scenes" / "compact_cell1ttt.ttt"
 DEFAULT_OUTPUT = REPO_ROOT / "data" / "logs" / "r4_repeat_acceptance.json"
 EXPECTED_SIZE = 2875907
 EXPECTED_SHA256 = "0e1c1b8ac6b0e9a7cdf1a49cc9abce85243fd5c03c5b38563d3e3cf3433af657"

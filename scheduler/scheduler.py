@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Callable, List
 
 from interfaces.scheduler_interface import IScheduler
-from interfaces.types import Order, RobotState, Task, TaskResult, TaskStatus
+from interfaces.types import Order, RobotState, RobotStatus, Task, TaskResult, TaskStatus
 from robot_control.r1_motion import R1_BOX_PLACED, R1_TERMINAL_PLACED
 from robot_control.r2_motion import R2_PCB_PLACED
 from robot_control.r3_motion import R3_MODULE_PLACED, R3_PRODUCT_TO_INSPECTION
@@ -35,6 +35,7 @@ class Scheduler(IScheduler):
     def __init__(self):
         self._callbacks: List[Callable] = []
         self._quality_by_order: dict[str, str] = {}
+        self.conflict_count = 0
 
     def set_state_change_callback(self, callback: Callable) -> None:
         self._callbacks.append(callback)
@@ -139,9 +140,23 @@ class Scheduler(IScheduler):
         self, tasks: List[Task], robots: List[RobotState]
     ) -> List[Task]:
         self._propagate_failed_predecessors(tasks)
-        if any(task.status == TaskStatus.RUNNING.value for task in tasks):
-            return tasks
-        idle = {robot.robot_id for robot in robots if robot.status == "idle"}
+        self.conflict_count = 0
+        idle = {
+            robot.robot_id
+            for robot in robots
+            if robot.status == RobotStatus.IDLE.value
+        }
+        assigned_robots = {
+            task.available_robots[0]
+            for task in tasks
+            if task.status == TaskStatus.RUNNING.value and task.available_robots
+        }
+        occupied_areas = {
+            area
+            for task in tasks
+            if task.status == TaskStatus.RUNNING.value
+            for area in (task.required_areas or [task.target_area])
+        }
         for task in tasks:
             if task.status not in {
                 TaskStatus.PENDING.value,
@@ -151,9 +166,29 @@ class Scheduler(IScheduler):
             if not self._predecessors_finished(task, tasks):
                 task.status = TaskStatus.WAITING.value
                 continue
-            if task.available_robots[0] in idle:
-                task.status = TaskStatus.RUNNING.value
-                break
+            required_areas = set(task.required_areas or [task.target_area])
+            if occupied_areas.intersection(required_areas):
+                task.status = TaskStatus.WAITING.value
+                self.conflict_count += 1
+                continue
+            candidate = next(
+                (
+                    robot_id
+                    for robot_id in task.available_robots
+                    if robot_id in idle and robot_id not in assigned_robots
+                ),
+                None,
+            )
+            if candidate is None:
+                task.status = TaskStatus.WAITING.value
+                continue
+            task.available_robots = [
+                candidate,
+                *[robot_id for robot_id in task.available_robots if robot_id != candidate],
+            ]
+            task.status = TaskStatus.RUNNING.value
+            assigned_robots.add(candidate)
+            occupied_areas.update(required_areas)
         self._notify()
         return tasks
 

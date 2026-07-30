@@ -16,9 +16,10 @@ def run_gui(
     host: str = "127.0.0.1",
     port: int = 23000,
     speed_deg_s: float = 50.0,
-    hold_seconds: float = 0.8,
+    hold_seconds: float = 1.0,
 ) -> int:
     """Start the GUI with either Mock or validated real adapters."""
+    hold_seconds = min(1.0, max(0.0, float(hold_seconds)))
     from app.main_app import Cr5AssemblyApp
     import tkinter as tk
 
@@ -121,8 +122,12 @@ def run_real_headless(
     order_id: str,
 ) -> int:
     """Execute one validated A-type unit through the real seven-task chain."""
+    hold_seconds = min(1.0, max(0.0, float(hold_seconds)))
     from interfaces.types import TaskStatus
     from robot_control.integrated_executor import IntegratedRobotExecutor
+    from robot_control.r1_motion import R1_BOX_PLACED, R1_TERMINAL_PLACED
+    from robot_control.r2_motion import R2_PCB_PLACED
+    from robot_control.r3_motion import R3_MODULE_PLACED, R3_PRODUCT_TO_INSPECTION
     from scheduler.order_parser import OrderParser
     from scheduler.scheduler import Scheduler
     from sim_bridge.coppelia_client import SimBridge
@@ -181,7 +186,10 @@ def run_real_headless(
 
         print("PREPARING resident READY state...", flush=True)
         ready_started = time.monotonic()
-        ready_evidence = executor.prepare_cycle(quality=quality)
+        ready_evidence = executor.prepare_cycle(
+            quality=quality,
+            preposition_front_half=False,
+        )
         ready_wall = time.monotonic() - ready_started
         evidence["ready_prepare_wall_s"] = ready_wall
         evidence["ready_evidence"] = ready_evidence
@@ -193,6 +201,46 @@ def run_real_headless(
         trigger_started = time.time()
         evidence["status"] = "running"
         evidence["trigger_started_at_epoch_s"] = trigger_started
+
+        coordinated_front_half = getattr(
+            executor, "execute_coordinated_front_half", None
+        )
+        if callable(coordinated_front_half):
+            print("[1-5/7] R1/R2/R3 coordinated front half", flush=True)
+            front = coordinated_front_half(
+                quality=quality,
+                order_id=order_id,
+            )
+            evidence["coordinated_front_half"] = front
+            evidence["tasks"].extend(front.get("tasks", []))
+            by_action = {task.target_point: task for task in tasks}
+            for record in front.get("tasks", []):
+                action = record["task"]["target_point"]
+                result = record["result"]
+                if action in by_action:
+                    by_action[action].status = result["status"]
+                    by_action[action].duration = max(
+                        0.0,
+                        float(result["end_time"]) - float(result["start_time"]),
+                    )
+            if front.get("status") != "finished":
+                evidence["status"] = "failed"
+                evidence["failed_tasks"] = [
+                    task.task_id
+                    for task in tasks
+                    if task.target_point
+                    in {
+                        R1_BOX_PLACED,
+                        R2_PCB_PLACED,
+                        R3_MODULE_PLACED,
+                        R1_TERMINAL_PLACED,
+                        R3_PRODUCT_TO_INSPECTION,
+                    }
+                    and task.status == TaskStatus.FAILED.value
+                ]
+                raise RuntimeError(
+                    f"coordinated front half failed: {front.get('errors', {})}"
+                )
 
         while not all(
             task.status
@@ -286,7 +334,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=23000)
     parser.add_argument("--speed-deg-s", type=float, default=50.0)
-    parser.add_argument("--hold-seconds", type=float, default=0.8)
+    parser.add_argument("--hold-seconds", type=float, default=1.0)
     parser.add_argument("--order-id", default="SCHEDULED-A-001")
     parser.add_argument("--output", type=Path)
     return parser.parse_args()

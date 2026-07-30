@@ -7,3 +7,5 @@ initial_positions:
   joint4: 0
   joint5: 0
   joint6: 0
+  finger_left_joint: 0.01
+  finger_right_joint: 0.01
