@@ -90,9 +90,9 @@ R5 根据检测结果把产品放到合格品或缺陷品传送带
 
 | 序号 | 脚本名 | 作用 | 运行状态 |
 |---|---|---|---|
-| 1 | `Step01_Create_Clean_Cell_60_GreyTable_RobotColor.lua` | 生成 60% 缩放总场景 | 运行一次后禁用 |
+| 1 | `Step01_Create_Clean_Cell_60_CloserTables_ColorReady.lua` | 生成 60% 缩放总场景 | 运行一次后禁用 |
 | 2 | `Create_Direct_Visible_EndEffectors_R1R3R5Wide_ConnectedJaw_R4fixed.lua` | 创建并安装 R1/R3/R5 夹爪、R2 吸盘、R4 螺丝刀 | 运行一次后禁用 |
-| 3 | `Step03_Create_Process_Targets_60.lua` | 创建 APP/TCP 工艺目标点 | 运行一次后禁用 |
+| 3 | `Step03_Create_Process_Targets_60_CloserTables.lua` | 创建 APP/TCP 工艺目标点 | 运行一次后禁用 |
 
 ### 3.2 运行类脚本：仿真时一直启用
 
@@ -100,9 +100,9 @@ R5 根据检测结果把产品放到合格品或缺陷品传送带
 
 | 序号 | 脚本名 | 作用 | 运行状态 |
 |---|---|---|---|
-| 4 | `Product_Stage_Controller_60.lua` | 控制产品阶段显示/隐藏 | 一直启用 |
+| 4 | `Product_Stage_Controller_60_ColorCycle_V4_CloserTables.lua` | 控制产品阶段显示/隐藏 | 一直启用 |
 | 5 | `Step02B_Tool_Action_Controller_V6_R1R3R5ConnectedJaw.lua` | 控制夹爪、吸盘、螺丝刀、工件绑定释放 | 一直启用 |
-| 6 | `ROS2_CompactCell_Bridge_V2_GlobalCallbacks.lua` | ROS2 与 CoppeliaSim 工艺命令互通 | 一直启用 |
+| 6 | `ROS2_CompactCell_Bridge_V3_ColorCycle.lua` | ROS2 与 CoppeliaSim 工艺命令互通 | 一直启用 |
 | 7 | `ROS2_Joint_Jog_Controller_R1_R5.lua` | ROS2 控制 R1~R5 关节点动 | 一直启用 |
 
 ---
@@ -193,7 +193,7 @@ Non-threaded child script
 粘贴脚本：
 
 ```text
-Step01_Create_Clean_Cell_60_GreyTable_RobotColor.lua
+Step01_Create_Clean_Cell_60_CloserTables_ColorReady.lua
 ```
 
 点击仿真运行一次。
@@ -429,7 +429,7 @@ Non-threaded child script
 粘贴脚本：
 
 ```text
-Product_Stage_Controller_60.lua
+Product_Stage_Controller_60_ColorCycle_V4_CloserTables.lua
 ```
 
 该脚本需要一直保持启用。
@@ -509,7 +509,7 @@ Non-threaded child script
 粘贴脚本：
 
 ```text
-ROS2_CompactCell_Bridge_V2_GlobalCallbacks.lua
+ROS2_CompactCell_Bridge_V3_ColorCycle.lua
 ```
 
 该脚本需要一直保持启用。
@@ -629,7 +629,7 @@ Non-threaded child script
 粘贴脚本：
 
 ```text
-Step03_Create_Process_Targets_60.lua
+Step03_Create_Process_Targets_60_CloserTables.lua
 ```
 
 运行一次。
@@ -951,18 +951,18 @@ ros2 topic pub /compact_cell/joint_cmd std_msgs/msg/String "{data: 'ALL HOME'}" 
 最终场景中应启用：
 
 ```text
-Product_Stage_Controller_60.lua
+Product_Stage_Controller_60_ColorCycle_V4_CloserTables.lua
 Step02B_Tool_Action_Controller_V6_R1R3R5ConnectedJaw.lua
-ROS2_CompactCell_Bridge_V2_GlobalCallbacks.lua
+ROS2_CompactCell_Bridge_V3_ColorCycle.lua
 ROS2_Joint_Jog_Controller_R1_R5.lua
 ```
 
 最终场景中应禁用：
 
 ```text
-Step01_Create_Clean_Cell_60_GreyTable_RobotColor.lua
+Step01_Create_Clean_Cell_60_CloserTables_ColorReady.lua
 Create_Direct_Visible_EndEffectors_R1R3R5Wide_ConnectedJaw_R4fixed.lua
-Step03_Create_Process_Targets_60.lua
+Step03_Create_Process_Targets_60_CloserTables.lua
 ```
 
 ---
@@ -1077,7 +1077,7 @@ cd /opt/CoppeliaSim_Edu_V4_10_0_rev0_Ubuntu22_04
 应使用：
 
 ```text
-ROS2_CompactCell_Bridge_V2_GlobalCallbacks.lua
+ROS2_CompactCell_Bridge_V3_ColorCycle.lua
 ```
 
 因为 CoppeliaSim 的 simROS2 订阅回调需要全局函数名。
