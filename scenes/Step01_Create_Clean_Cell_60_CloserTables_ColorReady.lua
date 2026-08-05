@@ -547,7 +547,7 @@ local function createScene()
     makeAssembledControlBox('Inspection_ControlBox_Product', P.inspection[1], P.inspection[2], PRODUCT_BOTTOM_Z, groups.Parts, COLOR_BOX)
 
     -- 传送带
-    makeConveyor('Good_Conveyor', {0.98, -1.68, 0.18}, 1.25, 0.36, 'Y', groups.Conveyors)
+    makeConveyor('Good_Conveyor', {0.48, -1.68, 0.18}, 1.25, 0.36, 'Y', groups.Conveyors)
     makeConveyor('Defect_Conveyor', {-0.75, -1.12, 0.18}, 1.20, 0.36, 'X', groups.Conveyors)
 
     print('[OK] Separated-table 60% cell created. No targets. No grippers.')

@@ -33,8 +33,8 @@ local CONVEYOR_ENABLED = true
 -- 右侧工作台和良品输送带调整后的产品起止点。
 -- goodStart 与 R5 的实际放置中心一致，启动输送时不再横向跳回旧坐标。
 local PRODUCT_ON_BELT_Z = 0.270
-local goodStart   = { 0.98, -1.06, PRODUCT_ON_BELT_Z}
-local goodEnd     = { 0.98, -2.20, PRODUCT_ON_BELT_Z}
+local goodStart   = { 0.48, -1.06, PRODUCT_ON_BELT_Z}
+local goodEnd     = { 0.48, -2.20, PRODUCT_ON_BELT_Z}
 local defectStart = {-0.15, -1.12, PRODUCT_ON_BELT_Z}
 local defectEnd   = {-1.25, -1.12, PRODUCT_ON_BELT_Z}
 local conveyorSpeed = 0.18
@@ -50,6 +50,10 @@ local COLOR_GOOD = {0.20, 0.90, 0.25}
 local COLOR_DEFECT = {0.95, 0.15, 0.10}
 
 local colorIndex = 0
+
+-- A/B 产品型号状态
+local currentProductType = 'A'   -- 'A' or 'B'
+local B_PARTS_ROOT = '/FiveCR5A_Cell/PartsB'
 
 local COLOR_SCHEMES = {
     {
@@ -222,6 +226,36 @@ local function setProductStage(productName,stage)
     setTreeVisible(base .. '_Terminal_Block', stage >= 4)
 end
 
+-- B型号产品阶段控制（路径在 PartsB 下）
+local function setBProductStage(stage)
+    local productName = 'Assembly_ControlBox_Product_B'
+    local productRoot = B_PARTS_ROOT .. '/' .. productName
+    local base = productRoot .. '/' .. productName
+
+    if stage <= 0 then
+        setTreeVisible(productRoot, false)
+        return
+    end
+
+    setTreeVisible(productRoot, false)
+    setTreeVisible(base .. '_Shell', stage >= 1)
+    setTreeVisible(base .. '_PCB', stage >= 2)
+    setTreeVisible(base .. '_Control_Module', stage >= 3)
+    setTreeVisible(base .. '_Terminal_Block', stage >= 4)
+end
+
+-- B型号检测产品控制
+local function setBInspectionStage(stage)
+    local productName = 'Inspection_ControlBox_Product_B'
+    local productRoot = B_PARTS_ROOT .. '/' .. productName
+
+    if stage <= 0 then
+        setTreeVisible(productRoot, false)
+        return
+    end
+    setTreeVisible(productRoot, true)
+end
+
 local function resetInitialState()
     if ADVANCE_COLOR_ON_RESET then
         nextColor()
@@ -229,9 +263,22 @@ local function resetInitialState()
         applyColorSchemeToSupply()
     end
 
-    showSupplyAll()
+    -- 隐藏所有 A 和 B 的装配/检测产品
     setProductStage('Assembly_ControlBox_Product',0)
     setProductStage('Inspection_ControlBox_Product',0)
+
+    -- 隐藏 B 装配/检测产品（如果存在）
+    setTreeVisible(B_PARTS_ROOT .. '/Assembly_ControlBox_Product_B', false)
+    setTreeVisible(B_PARTS_ROOT .. '/Inspection_ControlBox_Product_B', false)
+
+    -- 根据当前型号显示供料
+    if currentProductType == 'A' then
+        showSupplyAll()
+        hideAllBSupply()
+    else
+        hideAllASupply()
+        showAllBSupply()
+    end
 
     setTreeColor('/FiveCR5A_Cell/Sensors/Fixed_Vision_Camera_Station/Camera_View_Area',COLOR_CAMERA_VIEW)
 
@@ -244,7 +291,28 @@ local function resetInitialState()
     sim.clearStringSignal('cell_product_state')
     sim.clearStringSignal('cell_conveyor_state')
 
-    print('[STAGE] reset: only supply parts visible; assembly/inspection products hidden.')
+    print('[STAGE] reset: product type=' .. currentProductType)
+end
+
+local function hideAllASupply()
+    setTreeVisible('/FiveCR5A_Cell/Parts/Box_Blank', false)
+    setTreeVisible('/FiveCR5A_Cell/Parts/PCB_Supply', false)
+    setTreeVisible('/FiveCR5A_Cell/Parts/Control_Module_Supply', false)
+    setTreeVisible('/FiveCR5A_Cell/Parts/Terminal_Block_Supply', false)
+end
+
+local function hideAllBSupply()
+    setTreeVisible(B_PARTS_ROOT .. '/Box_Blank_B', false)
+    setTreeVisible(B_PARTS_ROOT .. '/PCB_Supply_B', false)
+    setTreeVisible(B_PARTS_ROOT .. '/Control_Module_Supply_B', false)
+    setTreeVisible(B_PARTS_ROOT .. '/Terminal_Block_Supply_B', false)
+end
+
+local function showAllBSupply()
+    setTreeVisible(B_PARTS_ROOT .. '/Box_Blank_B', true)
+    setTreeVisible(B_PARTS_ROOT .. '/PCB_Supply_B', true)
+    setTreeVisible(B_PARTS_ROOT .. '/Control_Module_Supply_B', true)
+    setTreeVisible(B_PARTS_ROOT .. '/Terminal_Block_Supply_B', true)
 end
 
 local function handleProductState(state)
@@ -252,6 +320,26 @@ local function handleProductState(state)
 
     if state == 'reset' then
         resetInitialState()
+
+    elseif state == 'product_a' then
+        currentProductType = 'A'
+        hideAllBSupply()
+        setTreeVisible(B_PARTS_ROOT .. '/Assembly_ControlBox_Product_B', false)
+        setTreeVisible(B_PARTS_ROOT .. '/Inspection_ControlBox_Product_B', false)
+        showSupplyAll()
+        setProductStage('Assembly_ControlBox_Product', 0)
+        setProductStage('Inspection_ControlBox_Product', 0)
+        print('[STAGE] >>> Product type switched to A <<<')
+
+    elseif state == 'product_b' then
+        currentProductType = 'B'
+        hideAllASupply()
+        setProductStage('Assembly_ControlBox_Product', 0)
+        setProductStage('Inspection_ControlBox_Product', 0)
+        showAllBSupply()
+        setTreeVisible(B_PARTS_ROOT .. '/Assembly_ControlBox_Product_B', false)
+        setTreeVisible(B_PARTS_ROOT .. '/Inspection_ControlBox_Product_B', false)
+        print('[STAGE] >>> Product type switched to B <<<')
 
     elseif state == 'color_next' then
         nextColor()
@@ -266,29 +354,54 @@ local function handleProductState(state)
         setColorIndex(3)
 
     elseif state == 'assembly_shell' or state == 'box_placed' then
-        setTreeVisible('/FiveCR5A_Cell/Parts/Box_Blank',false)
-        setProductStage('Assembly_ControlBox_Product',1)
-        print('[STAGE] assembly_shell')
+        if currentProductType == 'A' then
+            setTreeVisible('/FiveCR5A_Cell/Parts/Box_Blank', false)
+            setProductStage('Assembly_ControlBox_Product',1)
+        else
+            setTreeVisible(B_PARTS_ROOT .. '/Box_Blank_B', false)
+            setBProductStage(1)
+        end
+        print('[STAGE] assembly_shell (' .. currentProductType .. ')')
 
     elseif state == 'assembly_pcb' or state == 'pcb_placed' then
-        setTreeVisible('/FiveCR5A_Cell/Parts/PCB_Supply',false)
-        setProductStage('Assembly_ControlBox_Product',2)
-        print('[STAGE] assembly_pcb')
+        if currentProductType == 'A' then
+            setTreeVisible('/FiveCR5A_Cell/Parts/PCB_Supply', false)
+            setProductStage('Assembly_ControlBox_Product',2)
+        else
+            setTreeVisible(B_PARTS_ROOT .. '/PCB_Supply_B', false)
+            setBProductStage(2)
+        end
+        print('[STAGE] assembly_pcb (' .. currentProductType .. ')')
 
     elseif state == 'assembly_module' or state == 'module_placed' then
-        setTreeVisible('/FiveCR5A_Cell/Parts/Control_Module_Supply',false)
-        setProductStage('Assembly_ControlBox_Product',3)
-        print('[STAGE] assembly_module')
+        if currentProductType == 'A' then
+            setTreeVisible('/FiveCR5A_Cell/Parts/Control_Module_Supply', false)
+            setProductStage('Assembly_ControlBox_Product',3)
+        else
+            setTreeVisible(B_PARTS_ROOT .. '/Control_Module_Supply_B', false)
+            setBProductStage(3)
+        end
+        print('[STAGE] assembly_module (' .. currentProductType .. ')')
 
     elseif state == 'assembly_full' or state == 'terminal_placed' then
-        setTreeVisible('/FiveCR5A_Cell/Parts/Terminal_Block_Supply',false)
-        setProductStage('Assembly_ControlBox_Product',4)
-        print('[STAGE] assembly_full')
+        if currentProductType == 'A' then
+            setTreeVisible('/FiveCR5A_Cell/Parts/Terminal_Block_Supply', false)
+            setProductStage('Assembly_ControlBox_Product',4)
+        else
+            setTreeVisible(B_PARTS_ROOT .. '/Terminal_Block_Supply_B', false)
+            setBProductStage(4)
+        end
+        print('[STAGE] assembly_full (' .. currentProductType .. ')')
 
     elseif state == 'inspection_full' or state == 'product_to_inspection' then
-        setProductStage('Assembly_ControlBox_Product',0)
-        setProductStage('Inspection_ControlBox_Product',4)
-        print('[STAGE] inspection_full')
+        if currentProductType == 'A' then
+            setProductStage('Assembly_ControlBox_Product',0)
+            setProductStage('Inspection_ControlBox_Product',4)
+        else
+            setBProductStage(0)
+            setBInspectionStage(4)
+        end
+        print('[STAGE] inspection_full (' .. currentProductType .. ')')
 
     elseif state == 'camera_good' then
         setTreeColor('/FiveCR5A_Cell/Sensors/Fixed_Vision_Camera_Station/Camera_View_Area',COLOR_GOOD)

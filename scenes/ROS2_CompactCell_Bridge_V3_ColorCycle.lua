@@ -25,6 +25,15 @@ local pub_status = nil
 local mainMap = {
     RESET_CELL = {signal='cell_product_state', value='reset'},
 
+    -- 产品型号切换
+    PRODUCT_A = {signal='cell_product_state', value='product_a'},
+    PRODUCT_B = {signal='cell_product_state', value='product_b'},
+
+    -- 小车调度命令
+    CART_A_SUPPLY = {signal='cart_order', value='cart_a_supply'},
+    CART_B_SUPPLY = {signal='cart_order', value='cart_b_supply'},
+    CART_RESET    = {signal='cart_order', value='cart_reset'},
+
     -- 颜色循环命令：用于演示连续多个电柜时区分批次
     COLOR_NEXT = {signal='cell_product_state', value='color_next'},
     COLOR_1 = {signal='cell_product_state', value='color_1'},

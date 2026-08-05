@@ -61,7 +61,7 @@ local P = {
     moduleSupply   = {-0.78, -0.20},
     assembly       = {-1.08,  0.12},
     inspection     = {-0.04,  0.00},
-    goodPlace      = { 0.85, -1.10},
+    goodPlace      = { 0.35, -1.10},
     defectPlace    = {-0.15, -1.12},
 }
 
