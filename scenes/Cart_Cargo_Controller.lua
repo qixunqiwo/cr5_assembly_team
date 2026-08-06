@@ -10,7 +10,7 @@ local A_Supply, B_Supply
 
 -- 获取 cargo 树
 local function getCargoTree(cartHandle, prefix)
-    local name = prefix .. '_CargoBox'
+    local name = prefix .. '_CargoParts'
     -- 搜索 cart 下的 cargo
     local objs = sim.getObjectsInTree(cartHandle, sim.handle_all, 1)
     for _, h in ipairs(objs) do

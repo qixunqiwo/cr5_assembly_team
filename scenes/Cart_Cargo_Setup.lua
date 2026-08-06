@@ -1,49 +1,59 @@
 -- Cart_Cargo_Setup.lua
--- 在小车 CartA 和 CartB 上放置可见物料箱体
--- CartA 载 A 物料（灰色），CartB 载 B 物料（蓝橙）
+-- 在小车上放置真实AB物料模型（复制自实际供料件）
+-- CartA 载 A 物料，CartB 载 B 物料
 -- 运行一次后禁用
 
 sim = require('sim')
 
--- 在 cart 上创建一个货物箱体
-local function addCargo(cartHandle, prefix, boxColor, stripeColor)
+-- 复制一棵对象树到小车顶部
+local function copyPartsToCart(sourcePath, cartHandle, prefix)
     if cartHandle == -1 then return nil end
 
+    local source = sim.getObject(sourcePath)
+    if source == -1 then
+        print('[WARN] Source not found: ' .. sourcePath)
+        return nil
+    end
+
+    -- 复制整棵树
+    local objs = sim.getObjectsInTree(source, sim.handle_all, 0)
+    local copy = sim.copyPasteObjects(objs, 0)
+
+    -- 找到复制后的根节点
+    local root = nil
+    for _, h in ipairs(copy) do
+        if sim.getObjectParent(h) == -1 then
+            root = h; break
+        end
+    end
+
+    if not root then return nil end
+
+    -- 改名
+    sim.setObjectAlias(root, prefix .. '_CargoParts')
+
+    -- 挂到小车下
+    sim.setObjectParent(root, cartHandle, true)
+
+    -- 放到小车顶部（小车高约0.145m，放在上面）
     local cartPos = sim.getObjectPosition(cartHandle, -1)
+    local sourcePos = sim.getObjectPosition(source, -1)
+    local dx = sourcePos[1] - cartPos[1]
+    local dy = sourcePos[2] - cartPos[2]
+    local dz = sourcePos[3] - cartPos[3]
+    -- 移到小车顶
+    sim.setObjectPosition(root, cartHandle, {0, 0, 0.11})
 
-    -- 主体箱体（与供料箱体尺寸接近）
-    local body = sim.createPrimitiveShape(
-        sim.primitiveshape_cuboid,
-        {0.21, 0.15, 0.072}, 0)
-    sim.setObjectAlias(body, prefix .. '_CargoBox')
-    sim.setShapeColor(body, nil, sim.colorcomponent_ambient_diffuse, boxColor)
-    -- 放在小车顶面（小车高约0.145m）
-    sim.setObjectPosition(body, -1, {cartPos[1], cartPos[2], cartPos[3] + 0.10})
-    sim.setObjectParent(body, cartHandle, true)
+    -- 初始隐藏
+    for _, h in ipairs(copy) do
+        sim.setObjectInt32Param(h, sim.objintparam_visibility_layer, 0)
+    end
 
-    -- 顶部条纹标记
-    local stripe = sim.createPrimitiveShape(
-        sim.primitiveshape_cuboid,
-        {0.16, 0.03, 0.005}, 0)
-    sim.setObjectAlias(stripe, prefix .. '_CargoStripe')
-    sim.setShapeColor(stripe, nil, sim.colorcomponent_ambient_diffuse, stripeColor)
-    sim.setObjectPosition(stripe, -1, {0, 0, 0.04})
-    sim.setObjectParent(stripe, body, true)
-
-    -- 小PCB板（放在箱体上方）
-    local pcb = sim.createPrimitiveShape(
-        sim.primitiveshape_cuboid,
-        {0.14, 0.09, 0.005}, 0)
-    sim.setObjectAlias(pcb, prefix .. '_CargoPCB')
-    sim.setShapeColor(pcb, nil, sim.colorcomponent_ambient_diffuse, stripeColor)
-    sim.setObjectPosition(pcb, -1, {0, 0.02, 0.043})
-    sim.setObjectParent(pcb, body, true)
-
-    return body
+    return root
 end
 
 function sysCall_init()
-    print('===== Cart Cargo Setup =====')
+    print('===== Cart Cargo Setup (Real Parts) =====')
 
     local CartA = sim.getObject('/CartA')
     local CartB = sim.getObject('/CartB')
@@ -53,27 +63,54 @@ function sysCall_init()
         return
     end
 
-    -- CartA: 灰色箱体 + 绿色条纹（A物料配色）
-    local cargoA = addCargo(CartA, 'A', {0.62, 0.62, 0.62}, {0.0, 0.45, 0.18})
-    if cargoA then
-        -- 初始隐藏（CartA 在等待位）
-        local objs = sim.getObjectsInTree(cargoA, sim.handle_all, 0)
-        for _, h in ipairs(objs) do
-            sim.setObjectInt32Param(h, sim.objintparam_visibility_layer, 0)
-        end
-        print('[OK] CartA cargo: gray box + green stripe')
+    -- 删除旧的简版cargo（如果存在）
+    for _, prefix in ipairs({'A', 'B'}) do
+        local old = sim.getObject('/' .. prefix .. '_CargoBox')
+        if old ~= -1 then sim.removeObjects(sim.getObjectsInTree(old, sim.handle_all, 0)) end
     end
 
-    -- CartB: 蓝色箱体 + 橙色条纹（B物料配色）
-    local cargoB = addCargo(CartB, 'B', {0.20, 0.25, 0.60}, {0.95, 0.40, 0.10})
-    if cargoB then
-        local objs = sim.getObjectsInTree(cargoB, sim.handle_all, 0)
-        for _, h in ipairs(objs) do
-            sim.setObjectInt32Param(h, sim.objintparam_visibility_layer, 0)
-        end
-        print('[OK] CartB cargo: blue box + orange stripe')
+    -- CartA: 复制A供料件（箱体+PCB+模块+端子排）
+    local a1 = copyPartsToCart('/FiveCR5A_Cell/Parts/Box_Blank', CartA, 'A')
+    local a2 = copyPartsToCart('/FiveCR5A_Cell/Parts/PCB_Supply', CartA, 'A')
+    local a3 = copyPartsToCart('/FiveCR5A_Cell/Parts/Control_Module_Supply', CartA, 'A')
+    local a4 = copyPartsToCart('/FiveCR5A_Cell/Parts/Terminal_Block_Supply', CartA, 'A')
+
+    -- 调整A零件在小车上的位置（堆叠）
+    if a1 then
+        sim.setObjectPosition(a1, CartA, {0, 0, 0.10})        -- 箱体在底部
+    end
+    if a4 then
+        sim.setObjectPosition(a4, CartA, {0.045, -0.035, 0.14}) -- 端子排
+    end
+    if a2 then
+        sim.setObjectPosition(a2, CartA, {0, 0, 0.143})        -- PCB
+    end
+    if a3 then
+        sim.setObjectPosition(a3, CartA, {0.025, 0.025, 0.15}) -- 模块
     end
 
-    print('===== Setup done. Cargo visibility controlled by cart position. =====')
-    print('Run Cart_Cargo_Controller.lua to auto show/hide during orders.')
+    if a1 then print('[OK] CartA: A parts loaded') end
+
+    -- CartB: 复制B供料件
+    local b1 = copyPartsToCart('/FiveCR5A_Cell/PartsB/Box_Blank_B', CartB, 'B')
+    local b2 = copyPartsToCart('/FiveCR5A_Cell/PartsB/PCB_Supply_B', CartB, 'B')
+    local b3 = copyPartsToCart('/FiveCR5A_Cell/PartsB/Control_Module_Supply_B', CartB, 'B')
+    local b4 = copyPartsToCart('/FiveCR5A_Cell/PartsB/Terminal_Block_Supply_B', CartB, 'B')
+
+    if b1 then
+        sim.setObjectPosition(b1, CartB, {0, 0, 0.10})
+    end
+    if b4 then
+        sim.setObjectPosition(b4, CartB, {0.045, -0.035, 0.14})
+    end
+    if b2 then
+        sim.setObjectPosition(b2, CartB, {0, 0, 0.143})
+    end
+    if b3 then
+        sim.setObjectPosition(b3, CartB, {0.025, 0.025, 0.15})
+    end
+
+    if b1 then print('[OK] CartB: B parts loaded') end
+
+    print('===== Setup done. =====')
 end
