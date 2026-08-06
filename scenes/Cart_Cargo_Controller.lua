@@ -1,6 +1,6 @@
 -- Cart_Cargo_Controller.lua
 -- 根据小车位置自动显示/隐藏货物箱体
--- 供料位→显示货物，等待位→隐藏货物
+-- 等待位→显示货物（载料待命），供料位→隐藏货物（已卸料）
 -- 长期运行脚本
 
 sim = require('sim')
@@ -70,12 +70,12 @@ function sysCall_init()
 end
 
 function sysCall_actuation()
-    -- CartA: 在供料位显示，否则隐藏
+    -- CartA: 在供料位隐藏（已卸料），否则显示（载料中）
     if cargoA ~= -1 then
-        setTreeVisible(cargoA, isAtPosition(CartA, A_Supply))
+        setTreeVisible(cargoA, not isAtPosition(CartA, A_Supply))
     end
-    -- CartB: 在供料位显示，否则隐藏
+    -- CartB: 在供料位隐藏（已卸料），否则显示（载料中）
     if cargoB ~= -1 then
-        setTreeVisible(cargoB, isAtPosition(CartB, B_Supply))
+        setTreeVisible(cargoB, not isAtPosition(CartB, B_Supply))
     end
 end
