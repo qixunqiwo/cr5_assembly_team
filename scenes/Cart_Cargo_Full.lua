@@ -1,49 +1,20 @@
 -- Cart_Cargo_Full.lua
--- 一体化脚本：创建货物 + 自动显隐
--- 直接挂载为长期运行脚本即可，首次运行自动创建货物
+-- 创建真实外观货物 + 自动显隐，一体化脚本
+-- 新建 Dummy → Non-threaded child script → 粘贴 → 保持启用
 
 sim = require('sim')
 
 local CartA, CartB
 local A_Supply, B_Supply
-local cargoRoots = {}  -- {cartHandle = cargoRootHandle}
-local setupDone = false
+local allCargo = {}     -- {handle, cart ('A' or 'B')}
 
-local function copyPartsToCart(sourcePath, cartHandle, prefix)
-    local source = sim.getObject(sourcePath)
-    if source == -1 then return nil end
-    local objs = sim.getObjectsInTree(source, sim.handle_all, 0)
-    local copy = sim.copyPasteObjects(objs, 0)
-    local root = nil
-    for _, h in ipairs(copy) do
-        if sim.getObjectParent(h) == -1 then root = h; break end
-    end
-    if not root then return nil end
-    sim.setObjectAlias(root, prefix)
-    -- 重命名所有子对象避免别名冲突
-    for _, h in ipairs(copy) do
-        if h ~= root then
-            local n = ''
-            pcall(function() n = sim.getObjectAlias(h, 0) or '' end)
-            if n ~= '' then
-                pcall(function() sim.setObjectAlias(h, n .. '_cargo') end)
-            end
-        end
-    end
-    sim.setObjectParent(root, cartHandle, true)
-    -- 初始隐藏
-    for _, h in ipairs(copy) do
-        sim.setObjectInt32Param(h, sim.objintparam_visibility_layer, 0)
-    end
-    return root
-end
-
-local function setVisible(root, visible)
-    if root == -1 then return end
-    local objs = sim.getObjectsInTree(root, sim.handle_all, 0)
-    for _, h in ipairs(objs) do
-        sim.setObjectInt32Param(h, sim.objintparam_visibility_layer, visible and 1 or 0)
-    end
+local function makeBox(cart, size, pos, color)
+    local h = sim.createPrimitiveShape(sim.primitiveshape_cuboid, size, 0)
+    sim.setShapeColor(h, nil, sim.colorcomponent_ambient_diffuse, color)
+    sim.setObjectPosition(h, cart, pos)
+    sim.setObjectParent(h, cart, true)
+    sim.setObjectInt32Param(h, sim.objintparam_visibility_layer, 0)
+    return h
 end
 
 local function isAt(cart, target)
@@ -64,42 +35,111 @@ function sysCall_init()
         return
     end
 
-    -- 检查是否已创建
-    local testA = sim.getObject('/CartA/A_CargoParts')
-    local testB = sim.getObject('/CartB/B_CargoParts')
-
-    if testA == -1 then
-        print('[Cargo] Creating A parts on CartA...')
-        local a1 = copyPartsToCart('/FiveCR5A_Cell/Parts/Box_Blank', CartA, 'A_CargoParts')
-        if a1 then
-            sim.setObjectPosition(a1, CartA, {0, 0, 0.10})
-            local a2 = copyPartsToCart('/FiveCR5A_Cell/Parts/PCB_Supply', CartA, 'A_CargoPCB')
-            if a2 ~= -1 then sim.setObjectPosition(a2, CartA, {0, 0, 0.143}) end
-            local a3 = copyPartsToCart('/FiveCR5A_Cell/Parts/Control_Module_Supply', CartA, 'A_CargoModule')
-            if a3 ~= -1 then sim.setObjectPosition(a3, CartA, {0.025, 0.025, 0.15}) end
-            local a4 = copyPartsToCart('/FiveCR5A_Cell/Parts/Terminal_Block_Supply', CartA, 'A_CargoTerminal')
-            if a4 ~= -1 then sim.setObjectPosition(a4, CartA, {0.045, -0.035, 0.14}) end
-            print('[Cargo] CartA parts created')
-        end
-    else
-        print('[Cargo] CartA parts already exist')
+    -- 只在首次创建（检查 CartA 下是否已有 cargo）
+    local existing = sim.getObjectsInTree(CartA, sim.handle_all, 1)
+    local hasCargo = false
+    for _, h in ipairs(existing) do
+        local n = ''
+        pcall(function() n = sim.getObjectAlias(h, 0) or '' end)
+        if n == 'A_CargoBox' then hasCargo = true; break end
     end
 
-    if testB == -1 then
-        print('[Cargo] Creating B parts on CartB...')
-        local b1 = copyPartsToCart('/FiveCR5A_Cell/PartsB/Box_Blank_B', CartB, 'B_CargoParts')
-        if b1 then
-            sim.setObjectPosition(b1, CartB, {0, 0, 0.10})
-            local b2 = copyPartsToCart('/FiveCR5A_Cell/PartsB/PCB_Supply_B', CartB, 'B_CargoPCB')
-            if b2 ~= -1 then sim.setObjectPosition(b2, CartB, {0, 0, 0.143}) end
-            local b3 = copyPartsToCart('/FiveCR5A_Cell/PartsB/Control_Module_Supply_B', CartB, 'B_CargoModule')
-            if b3 ~= -1 then sim.setObjectPosition(b3, CartB, {0.025, 0.025, 0.15}) end
-            local b4 = copyPartsToCart('/FiveCR5A_Cell/PartsB/Terminal_Block_Supply_B', CartB, 'B_CargoTerminal')
-            if b4 ~= -1 then sim.setObjectPosition(b4, CartB, {0.045, -0.035, 0.14}) end
-            print('[Cargo] CartB parts created')
+    if not hasCargo then
+        print('[Cargo] Creating...')
+
+        -- === CartA: A物料（灰箱+绿PCB+深模块+黄端子） ===
+        local a1 = makeBox(CartA, {0.21, 0.15, 0.072}, {0, 0, 0.10}, {0.60, 0.60, 0.60})
+        sim.setObjectAlias(a1, 'A_CargoBox')
+        table.insert(allCargo, {h=a1, cart='A'})
+
+        local t = makeBox(CartA, {0.19, 0.006, 0.050}, {0, -0.072, 0.11}, {0.70, 0.70, 0.70})
+        table.insert(allCargo, {h=t, cart='A'})
+
+        t = makeBox(CartA, {0.14, 0.09, 0.006}, {0, 0.02, 0.142}, {0.0, 0.45, 0.18})
+        table.insert(allCargo, {h=t, cart='A'})
+
+        t = makeBox(CartA, {0.04, 0.04, 0.010}, {-0.02, 0.02, 0.148}, {0.10, 0.10, 0.10})
+        table.insert(allCargo, {h=t, cart='A'})
+
+        t = makeBox(CartA, {0.05, 0.04, 0.020}, {0.025, 0.020, 0.15}, {0.15, 0.15, 0.20})
+        table.insert(allCargo, {h=t, cart='A'})
+
+        t = makeBox(CartA, {0.10, 0.020, 0.020}, {0.045, -0.030, 0.14}, {0.92, 0.82, 0.35})
+        table.insert(allCargo, {h=t, cart='A'})
+
+        -- === CartB: B物料（蓝橙箱+底部法兰+紫PCB银芯片+橙红模块+绿端子+条纹） ===
+        local b1 = makeBox(CartB, {0.21, 0.15, 0.072}, {0, 0, 0.10}, {0.15, 0.20, 0.55})
+        sim.setObjectAlias(b1, 'B_CargoBox')
+        table.insert(allCargo, {h=b1, cart='B'})
+
+        t = makeBox(CartB, {0.19, 0.006, 0.050}, {0, -0.072, 0.11}, {0.95, 0.40, 0.10})
+        table.insert(allCargo, {h=t, cart='B'})
+
+        t = makeBox(CartB, {0.23, 0.17, 0.006}, {0, 0, 0.062}, {0.12, 0.12, 0.14})
+        table.insert(allCargo, {h=t, cart='B'})
+
+        -- 四角加强筋
+        for _, c in ipairs({{-0.10,-0.07},{0.10,-0.07},{-0.10,0.07},{0.10,0.07}}) do
+            t = makeBox(CartB, {0.016, 0.016, 0.025}, {c[1], c[2], 0.060}, {0.90, 0.45, 0.10})
+            table.insert(allCargo, {h=t, cart='B'})
         end
+
+        t = makeBox(CartB, {0.14, 0.09, 0.006}, {0, 0.02, 0.142}, {0.35, 0.05, 0.35})
+        table.insert(allCargo, {h=t, cart='B'})
+
+        t = makeBox(CartB, {0.04, 0.04, 0.010}, {-0.02, 0.02, 0.148}, {0.85, 0.85, 0.90})
+        table.insert(allCargo, {h=t, cart='B'})
+
+        t = makeBox(CartB, {0.05, 0.04, 0.020}, {0.025, 0.020, 0.15}, {0.95, 0.25, 0.15})
+        table.insert(allCargo, {h=t, cart='B'})
+
+        t = makeBox(CartB, {0.05, 0.02, 0.010}, {0.027, 0.020, 0.16}, {1.0, 1.0, 1.0})
+        table.insert(allCargo, {h=t, cart='B'})
+
+        t = makeBox(CartB, {0.10, 0.020, 0.020}, {0.045, -0.030, 0.14}, {0.10, 0.70, 0.25})
+        table.insert(allCargo, {h=t, cart='B'})
+
+        -- 左右外壁竖条纹
+        for j = 1, 3 do
+            t = makeBox(CartB, {0.004, 0.015, 0.055}, {-0.107, (j-2)*0.04, 0.10}, {0.08, 0.12, 0.45})
+            table.insert(allCargo, {h=t, cart='B'})
+            t = makeBox(CartB, {0.004, 0.015, 0.055}, {0.107, (j-2)*0.04, 0.10}, {0.08, 0.12, 0.45})
+            table.insert(allCargo, {h=t, cart='B'})
+        end
+
+        print('[Cargo] Created ' .. #allCargo .. ' parts')
     else
-        print('[Cargo] CartB parts already exist')
+        -- 收集已有 cargo handles
+        local function collectCart(cartHandle, cartId)
+            local kids = sim.getObjectsInTree(cartHandle, sim.handle_all, 1)
+            for _, h in ipairs(kids) do
+                local n = ''
+                pcall(function() n = sim.getObjectAlias(h, 0) or '' end)
+                if string.find(n, 'Cargo') then
+                    local subs = sim.getObjectsInTree(h, sim.handle_all, 0)
+                    for _, s in ipairs(subs) do
+                        table.insert(allCargo, {h=s, cart=cartId})
+                    end
+                end
+            end
+            -- 也收集非 CargoBox 的散件
+            for _, h in ipairs(kids) do
+                local t = ''
+                pcall(function() t = tostring(sim.getObjectType(h)) end)
+                if t == tostring(sim.object_shape_type) then
+                    local alreadyIn = false
+                    for _, c in ipairs(allCargo) do
+                        if c.h == h then alreadyIn = true; break end
+                    end
+                    if not alreadyIn then
+                        table.insert(allCargo, {h=h, cart=cartId})
+                    end
+                end
+            end
+        end
+        collectCart(CartA, 'A')
+        collectCart(CartB, 'B')
+        print('[Cargo] Found ' .. #allCargo .. ' existing parts')
     end
 
     print('[Cargo] Ready')
@@ -108,26 +148,14 @@ end
 function sysCall_actuation()
     if CartA == -1 or CartB == -1 then return end
 
-    -- 刷新 cargo 引用
-    local aCargo = sim.getObject('/CartA/A_CargoParts')
-    local bCargo = sim.getObject('/CartB/B_CargoParts')
+    local aSupply = isAt(CartA, A_Supply)
+    local bSupply = isAt(CartB, B_Supply)
 
-    -- CartA cargo: 等待位显示，供料位隐藏
-    if aCargo ~= -1 then
-        setVisible(aCargo, not isAt(CartA, A_Supply))
-        -- 同步子零件
-        for _, prefix in ipairs({'A_CargoPCB', 'A_CargoModule', 'A_CargoTerminal'}) do
-            local h = sim.getObject('/CartA/' .. prefix)
-            if h ~= -1 then setVisible(h, not isAt(CartA, A_Supply)) end
-        end
-    end
-
-    -- CartB cargo: 等待位显示，供料位隐藏
-    if bCargo ~= -1 then
-        setVisible(bCargo, not isAt(CartB, B_Supply))
-        for _, prefix in ipairs({'B_CargoPCB', 'B_CargoModule', 'B_CargoTerminal'}) do
-            local h = sim.getObject('/CartB/' .. prefix)
-            if h ~= -1 then setVisible(h, not isAt(CartB, B_Supply)) end
+    for _, c in ipairs(allCargo) do
+        if c.cart == 'A' then
+            sim.setObjectInt32Param(c.h, sim.objintparam_visibility_layer, aSupply and 0 or 1)
+        else
+            sim.setObjectInt32Param(c.h, sim.objintparam_visibility_layer, bSupply and 0 or 1)
         end
     end
 end
