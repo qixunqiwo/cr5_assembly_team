@@ -28,6 +28,8 @@ local carts={
 
 local order=nil
 local changing=false
+local arriveTime=nil
+local SWITCH_DELAY=3.0   -- 小车到位后等待3秒再切换物料
 
 
 local function setTarget(id,target)
@@ -128,17 +130,18 @@ function sysCall_actuation()
     updateCart("B")
 
     if changing and allArrived() then
+        if arriveTime==nil then
+            arriveTime=sim.getSimulationTime()
+            print("Carts arrived, waiting "..SWITCH_DELAY.."s...")
+        end
 
-        sim.setStringSignal(
-            'product_type',
-            order
-        )
-
-        print("product_type:",order)
-
-        changing=false
+        if sim.getSimulationTime()-arriveTime>=SWITCH_DELAY then
+            sim.setStringSignal('product_type',order)
+            print("product_type:",order)
+            changing=false
+            arriveTime=nil
+        end
     end
-
 end
 
 
