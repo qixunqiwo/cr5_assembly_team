@@ -34,22 +34,22 @@ from robot_control.r3_motion import (
 from robot_control.r4_motion import (
     R4_ACTIONS,
     R4_SCREW_DONE,
-    R4_WAIT_POINT,
     R4MotionController,
 )
 from robot_control.r5_motion import (
     R5_ACTIONS,
     R5_SORT_DEFECT_DONE,
     R5_SORT_GOOD_DONE,
-    R5_WAIT_POINT,
     R5MotionController,
 )
 from sim_bridge.coppelia_client import SimBridge
 from sim_bridge.scene_objects import ROBOT_IDS, SENSORS, normalize_robot_id
 
 
-SUPPORTED_ACTIONS = R1_ACTIONS | R2_ACTIONS | R3_ACTIONS | R4_ACTIONS | R5_ACTIONS
+COORDINATED_CYCLE = "COORDINATED_CYCLE"
+SUPPORTED_ACTIONS = R1_ACTIONS | R2_ACTIONS | R3_ACTIONS | R4_ACTIONS | R5_ACTIONS | {COORDINATED_CYCLE}
 ACTION_ROBOTS = {
+    COORDINATED_CYCLE: "R1",
     **{action: "R1" for action in R1_ACTIONS},
     **{action: "R2" for action in R2_ACTIONS},
     **{action: "R3" for action in R3_ACTIONS},
@@ -104,6 +104,7 @@ class RobotExecutor(IRobotExecutor):
         self._controllers: Dict[str, Any] = {}
         self._ready = False
         self._last_error = ""
+        self._fast_demo = False
         self._robots: Dict[str, RobotState] = {
             robot_id: RobotState(robot_id=robot_id)
             for robot_id in ROBOT_IDS
@@ -112,6 +113,17 @@ class RobotExecutor(IRobotExecutor):
     @property
     def last_error(self) -> str:
         return self._last_error
+
+    def set_fast_demo(self, enabled: bool) -> None:
+        """开启/关闭快速演示模式（所有机械臂大步进直设，速度快且顺）。"""
+        self._fast_demo = bool(enabled)
+        for controller in self._controllers.values():
+            setter = getattr(controller, "set_fast_mode", None)
+            if setter is not None:
+                setter(self._fast_demo)
+            r5_setter = getattr(controller, "set_flow_demo_speed", None)
+            if r5_setter is not None:
+                r5_setter(500.0 if self._fast_demo else None)
 
     @staticmethod
     def _resolve_action(task: Task) -> Optional[str]:
@@ -296,8 +308,8 @@ class RobotExecutor(IRobotExecutor):
         self,
         r2: Any,
         r3: Any,
-        r4: Any,
-        r5: Any,
+        r4: Any | None,
+        r5: Any | None,
         r5_action: str,
         preposition_front_half: bool = False,
     ) -> float:
@@ -324,12 +336,10 @@ class RobotExecutor(IRobotExecutor):
             entries.append(
                 ("R3", r3, R3_MODULE_PLACED, "initial_to_pick_app")
             )
-            entries.extend(
-                [
-                    ("R4", r4, None, "home_to_wait"),
-                    ("R5", r5, r5_action, "home_to_wait"),
-                ]
-            )
+            if r4 is not None:
+                entries.append(("R4", r4, None, "home_to_wait"))
+            if r5 is not None:
+                entries.append(("R5", r5, r5_action, "home_to_wait"))
         total_sim_time = 0.0
         for robot_id, controller, action_key, segment_name in entries:
             prepared = getattr(controller, "_prepared_paths", None)
@@ -421,6 +431,7 @@ class RobotExecutor(IRobotExecutor):
         quality: str = "good",
         preload_both_r5: bool = False,
         preposition_front_half: bool = False,
+        front_half_only: bool = False,
     ) -> dict[str, Any]:
         """Precompute deterministic paths, then enter the resident READY state."""
         selected_r5_action = self._quality_action(quality)
@@ -434,19 +445,22 @@ class RobotExecutor(IRobotExecutor):
             r1 = self._controller_for("R1")
             r2 = self._controller_for("R2")
             r3 = self._controller_for("R3")
-            r4 = self._controller_for("R4")
-            r5 = self._controller_for("R5")
+            r4 = None if front_half_only else self._controller_for("R4")
+            r5 = None if front_half_only else self._controller_for("R5")
 
             evidence.append(r1.prepare(R1_BOX_PLACED))
             evidence.append(r2.prepare(R2_PCB_PLACED))
             evidence.append(r3.prepare(R3_MODULE_PLACED))
             evidence.append(r3.prepare(R3_PRODUCT_TO_INSPECTION))
-            evidence.append(r4.prepare(R4_SCREW_DONE))
-            r5_actions = [selected_r5_action]
-            if preload_both_r5:
-                r5_actions = [R5_SORT_GOOD_DONE, R5_SORT_DEFECT_DONE]
-            for action in r5_actions:
-                evidence.append(r5.prepare(action))
+            if not front_half_only:
+                assert r4 is not None
+                assert r5 is not None
+                evidence.append(r4.prepare(R4_SCREW_DONE))
+                r5_actions = [selected_r5_action]
+                if preload_both_r5:
+                    r5_actions = [R5_SORT_GOOD_DONE, R5_SORT_DEFECT_DONE]
+                for action in r5_actions:
+                    evidence.append(r5.prepare(action))
 
             # simIK preparation writes temporary model configurations.
             # Re-run the scene initialization cycle after every path has been
@@ -455,9 +469,12 @@ class RobotExecutor(IRobotExecutor):
             post_planning_scene_reset = self._bootstrap_scene_kinematics()
             camera_station = self._relocate_camera_station()
 
-            for controller in (r1, r2, r3, r4):
+            for controller in (r1, r2, r3):
                 controller.set_continuous_stepping(True)
-            r5.set_continuous_stepping(False)
+            if r4 is not None:
+                r4.set_continuous_stepping(True)
+            if r5 is not None:
+                r5.set_continuous_stepping(False)
 
             ready_state = r1.enter_ready()
             self._restore_idle_robots_at_ready()
@@ -496,6 +513,7 @@ class RobotExecutor(IRobotExecutor):
             "ready": True,
             "quality_action": selected_r5_action,
             "preloaded_both_r5": bool(preload_both_r5),
+            "front_half_only": bool(front_half_only),
             "controllers": evidence,
             "path_points_total": path_points,
             "ready_state": ready_state,
@@ -526,189 +544,16 @@ class RobotExecutor(IRobotExecutor):
         quality: str = "good",
         order_id: str = "FIVE-ARM-DEMO",
     ) -> dict[str, Any]:
-        """Run the taught R1/R2/R3 front half with explicit handoff gates."""
-        from robot_control.coordinated_front_half import CoordinatedFrontHalfRunner
-
-        selected_r5_action = self._quality_action(quality)
+        """Run the R1/R2/R3 front half through the corrected controllers."""
+        deferred_quality_action = self._quality_action(quality)
+        if not self._ready:
+            self.prepare_cycle(quality=quality, front_half_only=True)
 
         task_entries = [
             (R1_BOX_PLACED, "R1", "assemble", "assembly_area"),
             (R2_PCB_PLACED, "R2", "assemble", "assembly_area"),
-            (R3_MODULE_PLACED, "R3", "assemble", "assembly_area"),
             (R1_TERMINAL_PLACED, "R1", "assemble", "assembly_area"),
-            (
-                R3_PRODUCT_TO_INSPECTION,
-                "R3",
-                "transfer",
-                "inspection_screw_area",
-            ),
-        ]
-
-        with self._execution_lock:
-            self._connect()
-            tasks = {
-                action: self._coordinated_task(
-                    action,
-                    robot_id,
-                    index,
-                    order_id,
-                    process,
-                    area,
-                )
-                for index, (action, robot_id, process, area) in enumerate(
-                    task_entries, start=1
-                )
-            }
-            start_wall = time.time()
-            start_sim = float(self._bridge.sim.getSimulationTime())
-            for _, robot_id, _, _ in task_entries:
-                with self._state_lock:
-                    state = self._robots[robot_id]
-                    state.status = RobotStatus.BUSY.value
-                    state.current_task = "COORDINATED_FRONT_HALF"
-            try:
-                runner = CoordinatedFrontHalfRunner(
-                    self._bridge,
-                    speed_deg_s=self._speed_deg_s,
-                    hold_seconds=self._hold_seconds,
-                )
-                details = runner.execute()
-                prepositioned = details.get("prepositioned_configs", {})
-                r4_config = prepositioned.get("R4", {}).get("config")
-                if r4_config is not None:
-                    r4 = self._controller_for("R4")
-                    setter = getattr(r4, "set_pre_positioned", None)
-                    if setter is not None:
-                        setter(R4_SCREW_DONE, list(r4_config))
-                    with self._state_lock:
-                        self._robots["R4"].position = R4_WAIT_POINT
-                r5_config = prepositioned.get("R5", {}).get("config")
-                if r5_config is not None:
-                    r5 = self._controller_for("R5")
-                    setter = getattr(r5, "set_pre_positioned", None)
-                    if setter is not None:
-                        setter(selected_r5_action, list(r5_config))
-                    with self._state_lock:
-                        self._robots["R5"].position = R5_WAIT_POINT
-            except Exception as exc:
-                end_wall = time.time()
-                try:
-                    end_sim = float(self._bridge.sim.getSimulationTime())
-                except Exception:
-                    end_sim = start_sim
-                cleanup_error = ""
-                try:
-                    self._bridge.stop_simulation()
-                except Exception as cleanup_exc:
-                    cleanup_error = str(cleanup_exc)
-                result = TaskResult(
-                    task_id=f"{order_id}-COORDINATED_FRONT_HALF",
-                    robot_id="R1/R2/R3/R4/R5",
-                    status=TaskStatus.FAILED.value,
-                    start_time=start_wall,
-                    end_time=end_wall,
-                    message=(
-                        str(exc)
-                        if not cleanup_error
-                        else f"{exc}; cleanup_error={cleanup_error}"
-                    ),
-                )
-                for _, robot_id, _, _ in task_entries:
-                    with self._state_lock:
-                        state = self._robots[robot_id]
-                        if state.status != RobotStatus.FAULT.value:
-                            state.status = RobotStatus.IDLE.value
-                        state.current_task = None
-                record = {
-                    "task": {
-                        "task_id": result.task_id,
-                        "order_id": order_id,
-                        "product_type": "A",
-                        "process": "coordinated_front_half",
-                        "target_area": "assembly_area",
-                        "target_point": "COORDINATED_FRONT_HALF",
-                        "available_robots": ["R1", "R2", "R3", "R4", "R5"],
-                    },
-                    "coordinated_front_half": True,
-                    "single_step_runner": True,
-                    "start_wall_epoch_s": start_wall,
-                    "end_wall_epoch_s": end_wall,
-                    "start_simulation_time_s": start_sim,
-                    "end_simulation_time_s": end_sim,
-                    "wall_duration_s": end_wall - start_wall,
-                    "simulation_duration_s": max(0.0, end_sim - start_sim),
-                    "result": result.to_dict(),
-                }
-                return {
-                    "status": "failed",
-                    "tasks": [record],
-                    "failed_action": "COORDINATED_FRONT_HALF",
-                    "errors": {"COORDINATED_FRONT_HALF": str(exc)},
-                }
-
-            end_wall = time.time()
-            end_sim = float(self._bridge.sim.getSimulationTime())
-            records = []
-            for action, robot_id, process, area in task_entries:
-                task = tasks[action]
-                result = TaskResult(
-                    task_id=task.task_id,
-                    robot_id=robot_id,
-                    status=TaskStatus.FINISHED.value,
-                    start_time=start_wall,
-                    end_time=end_wall,
-                    message=(
-                        f"{action} completed in single-step coordinated "
-                        f"front half; {details}"
-                    ),
-                )
-                records.append(
-                    {
-                        "task": task.to_dict(),
-                        "coordinated_front_half": True,
-                        "single_step_runner": True,
-                        "start_wall_epoch_s": start_wall,
-                        "end_wall_epoch_s": end_wall,
-                        "start_simulation_time_s": start_sim,
-                        "end_simulation_time_s": end_sim,
-                        "wall_duration_s": end_wall - start_wall,
-                        "simulation_duration_s": max(0.0, end_sim - start_sim),
-                        "motion_timing": {
-                            "robot_id": robot_id,
-                            "motion_detected": True,
-                            "monitor_error": "single-step coordinated direct run",
-                        },
-                        "result": result.to_dict(),
-                    }
-                )
-                with self._state_lock:
-                    state = self._robots[robot_id]
-                    state.completed_tasks += 1
-                    state.status = RobotStatus.IDLE.value
-                    state.current_task = None
-                    if action == R2_PCB_PLACED:
-                        state.position = "R2_PCB_PICK_APP"
-                    elif action == R3_MODULE_PLACED:
-                        state.position = (
-                            "R3_TEMP_CLEAR_FOR_R1_TERMINAL_BEFORE_PRODUCT_PICK_APP"
-                        )
-                    elif action == R3_PRODUCT_TO_INSPECTION:
-                        state.position = R3_PRODUCT_TRANSFER_CLEARANCE
-                    else:
-                        state.position = "home"
-            return {
-                "status": "finished",
-                "tasks": records,
-                "failed_action": None,
-                "errors": {},
-                "details": details,
-            }
-
-        task_entries = [
-            (R1_BOX_PLACED, "R1"),
-            (R2_PCB_PLACED, "R2"),
-            (R3_MODULE_PLACED, "R3"),
-            (R1_TERMINAL_PLACED, "R1"),
+            (R3_MODULE_PLACED, "R3", "assemble", "assembly_area"),
             (
                 R3_PRODUCT_TO_INSPECTION,
                 "R3",
@@ -718,9 +563,7 @@ class RobotExecutor(IRobotExecutor):
         ]
         tasks: dict[str, Task] = {}
         for index, entry in enumerate(task_entries, start=1):
-            action, robot_id = entry[0], entry[1]
-            process = entry[2] if len(entry) > 2 else "assemble"
-            area = entry[3] if len(entry) > 3 else "assembly_area"
+            action, robot_id, process, area = entry
             tasks[action] = self._coordinated_task(
                 action, robot_id, index, order_id, process, area
             )
@@ -739,30 +582,8 @@ class RobotExecutor(IRobotExecutor):
                 if setter is not None:
                     setter(True)
 
-            pcb_done = threading.Event()
-            module_done = threading.Event()
             records: dict[str, dict[str, Any]] = {}
             errors: dict[str, str] = {}
-            result_lock = threading.Lock()
-
-            def wait_for_pcb() -> None:
-                pcb_done.wait()
-                error = errors.get(R2_PCB_PLACED)
-                if error:
-                    raise RuntimeError(
-                        f"R3 module placement blocked because R2 failed: {error}"
-                    )
-
-            def wait_for_module() -> None:
-                module_done.wait()
-                error = errors.get(R3_MODULE_PLACED)
-                if error:
-                    raise RuntimeError(
-                        f"R1 terminal placement blocked because R3 failed: {error}"
-                    )
-
-            r3.set_assembly_entry_wait(R3_MODULE_PLACED, wait_for_pcb)
-            r1.set_assembly_entry_wait(R1_TERMINAL_PLACED, wait_for_module)
 
             def run_action(action: str, controller: Any) -> None:
                 task = tasks[action]
@@ -785,8 +606,7 @@ class RobotExecutor(IRobotExecutor):
                 except Exception as exc:
                     status = TaskStatus.FAILED.value
                     message = str(exc)
-                    with result_lock:
-                        errors[action] = message
+                    errors[action] = message
                 finally:
                     end_wall = time.time()
                     end_sim = float(self._bridge.sim.getSimulationTime())
@@ -829,49 +649,29 @@ class RobotExecutor(IRobotExecutor):
                         "motion_timing": {
                             "robot_id": robot_id,
                             "motion_detected": status == TaskStatus.FINISHED.value,
-                            "monitor_error": "coordinated front-half direct run",
+                            "monitor_error": (
+                                "new-controller front-half direct run"
+                            ),
                         },
                         "result": result.to_dict(),
                     }
                     if details is not None:
                         record["controller_details"] = details
-                    with result_lock:
-                        records[action] = record
-                    if action == R2_PCB_PLACED:
-                        pcb_done.set()
-                    if action == R3_MODULE_PLACED:
-                        module_done.set()
-
-            def start_thread(action: str, controller: Any) -> threading.Thread:
-                thread = threading.Thread(
-                    target=run_action,
-                    args=(action, controller),
-                    name=f"coordinated-{action}",
-                    daemon=True,
-                )
-                thread.start()
-                return thread
+                    records[action] = record
 
             try:
-                r1_box = start_thread(R1_BOX_PLACED, r1)
-                r2_pcb = start_thread(R2_PCB_PLACED, r2)
-                r3_module = start_thread(R3_MODULE_PLACED, r3)
-
-                r1_box.join()
-                r1_terminal: threading.Thread | None = None
-                if R1_BOX_PLACED not in errors:
-                    r1_terminal = start_thread(R1_TERMINAL_PLACED, r1)
-
-                r2_pcb.join()
-                r3_module.join()
-                if r1_terminal is not None:
-                    r1_terminal.join()
-
-                if not errors:
-                    run_action(R3_PRODUCT_TO_INSPECTION, r3)
+                sequence = [
+                    (R1_BOX_PLACED, r1),
+                    (R2_PCB_PLACED, r2),
+                    (R1_TERMINAL_PLACED, r1),
+                    (R3_MODULE_PLACED, r3),
+                    (R3_PRODUCT_TO_INSPECTION, r3),
+                ]
+                for action, controller in sequence:
+                    run_action(action, controller)
+                    if action in errors:
+                        break
             finally:
-                pcb_done.set()
-                module_done.set()
                 r3.set_assembly_entry_wait(R3_MODULE_PLACED, None)
                 r1.set_assembly_entry_wait(R1_TERMINAL_PLACED, None)
                 for controller in (r2, r3):
@@ -884,8 +684,8 @@ class RobotExecutor(IRobotExecutor):
                 for action in (
                     R1_BOX_PLACED,
                     R2_PCB_PLACED,
-                    R3_MODULE_PLACED,
                     R1_TERMINAL_PLACED,
+                    R3_MODULE_PLACED,
                     R3_PRODUCT_TO_INSPECTION,
                 )
                 if action in records
@@ -896,8 +696,8 @@ class RobotExecutor(IRobotExecutor):
                     for action in (
                         R1_BOX_PLACED,
                         R2_PCB_PLACED,
-                        R3_MODULE_PLACED,
                         R1_TERMINAL_PLACED,
+                        R3_MODULE_PLACED,
                         R3_PRODUCT_TO_INSPECTION,
                     )
                     if action in errors
@@ -909,6 +709,43 @@ class RobotExecutor(IRobotExecutor):
                 "tasks": ordered_records,
                 "failed_action": failed_action,
                 "errors": dict(errors),
+                "handoff_ready_for_r4": failed_action is None,
+                "handoff_state": (
+                    R3_PRODUCT_TRANSFER_CLEARANCE if failed_action is None else ""
+                ),
+                "front_half_order": "terminal_first",
+                "controller_runner": True,
+                "single_step_runner": False,
+                "parallel_controller_threads": False,
+                "deferred_quality_action": deferred_quality_action,
+                "details": {
+                    "status": "failed" if failed_action else "finished",
+                    "actions": [
+                        R1_BOX_PLACED,
+                        R2_PCB_PLACED,
+                        R1_TERMINAL_PLACED,
+                        R3_MODULE_PLACED,
+                        R3_PRODUCT_TO_INSPECTION,
+                    ],
+                    "handoff_ready_for_r4": failed_action is None,
+                    "handoff_state": (
+                        R3_PRODUCT_TRANSFER_CLEARANCE
+                        if failed_action is None
+                        else ""
+                    ),
+                    "front_half_order": "terminal_first",
+                    "controller_runner": True,
+                    "single_step_runner": False,
+                    "parallel_controller_threads": False,
+                    "new_controller_sequence": [
+                        R1_BOX_PLACED,
+                        R2_PCB_PLACED,
+                        R1_TERMINAL_PLACED,
+                        R3_MODULE_PLACED,
+                        R3_PRODUCT_TO_INSPECTION,
+                    ],
+                    "deferred_quality_action": deferred_quality_action,
+                },
             }
 
     def execute_task(self, task: Task) -> TaskResult:
@@ -977,6 +814,28 @@ class RobotExecutor(IRobotExecutor):
             state.current_task = task.task_id
 
         try:
+            if action == COORDINATED_CYCLE:
+                # 五臂完整协调: 交由 CoordinatedEngine 执行
+                from robot_control.coordinated_engine import CoordinatedEngine
+
+                engine = CoordinatedEngine()
+                result = engine.run_cycle(quality=task.quality_result or "good")
+                if result.get("status") != "ok":
+                    raise RuntimeError(
+                        f"coordinated cycle failed: {result.get('message')}"
+                    )
+                with self._state_lock:
+                    state = self._robots[robot_id]
+                    state.position = "home"
+                    state.completed_tasks += 1
+                self._last_error = ""
+                return self._result(
+                    task,
+                    robot_id,
+                    TaskStatus.FINISHED.value,
+                    start_time,
+                    f"{COORDINATED_CYCLE} completed; {result.get('message', '')[:200]}",
+                )
             with self._execution_lock:
                 self._connect()
                 controller = self._controller_for(robot_id)
