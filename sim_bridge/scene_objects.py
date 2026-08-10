@@ -142,7 +142,7 @@ WORKSPACES = {
     },
     # The imported R2 model occupies y=-0.8164 m in its initial clearance
     # posture.  Include that posture plus a small numerical guard margin.
-    "R2": {"lower": (-1.90, -0.83, 0.04), "upper": (-0.95, 0.38, 1.55)},
+    "R2": {"lower": (-1.90, -0.83, 0.04), "upper": (-0.88, 0.38, 1.55)},
     "R2_PRIVATE_SUPPLY": {
         "lower": (-1.46, -0.42, 0.14),
         "upper": (-1.10, -0.14, 0.55),
