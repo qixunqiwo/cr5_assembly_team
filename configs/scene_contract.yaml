@@ -18,6 +18,6 @@ notes:
 scene:
   file: compact_cell.ttt
   root: /FiveCR5A_Cell
-  sha256: 64ec48f20c9a606c4133e28d90e37dcfb29e46cfc8be7bc7d7527aa04d1fdbd4
-  size: 23662412
+  sha256: 0879fe07efeff2ccfb5bd6eb578d942c22370cce11cd400acb39ce75ef9eb18c
+  size: 23662376
 schema_version: 1

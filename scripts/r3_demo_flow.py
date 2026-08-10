@@ -25,6 +25,7 @@ FLOW = [
     ("抬升", ["r3_module_place_descend.json"], None),
     ("去产品", ["r3_module_to_product_pick_app.json"], None),
     ("抓产品", ["r3_product_pick_descend.json"], None),
+    ("抬升", ["r3_product_pick_descend.json"], None),
     ("转运产品", ["r3_product_transfer.json"], None),
     ("放产品", ["r3_product_place_descend.json"], None),
     ("抬升离开", ["r3_product_place_descend.json"], None),

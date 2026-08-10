@@ -172,14 +172,9 @@ def main():
     sim.setObjectQuaternion(pcb, -1, [1, 0, 0, 0])
     sim.setObjectPosition(module, -1, [-0.78, -0.20, 0.1665])
     sim.setObjectQuaternion(module, -1, [1, 0, 0, 0])
-    sim.setObjectPosition(product, -1, [-1.08, 0.12, 0.2160])
-    sim.setObjectQuaternion(product, -1, [0, 0, 0, 1])  # yaw=180, 与参考产品一致
     for part in (box, term, pcb, module):
         for s in sim.getObjectsInTree(part, sim.object_shape_type, 0):
             sim.setObjectInt32Param(s, sim.objintparam_visibility_layer, 1)
-    # 成品(Inspection产品)组装完成前不可见
-    for s in sim.getObjectsInTree(product, sim.object_shape_type, 0):
-        sim.setObjectInt32Param(s, sim.objintparam_visibility_layer, 0)
     # 检测区展示产品B (PartsB) 与转运产品重叠, 隐藏+移走
     try:
         insp_b = sim.getObject("/FiveCR5A_Cell/PartsB/Inspection_ControlBox_Product_B")
@@ -265,7 +260,8 @@ def main():
     if not start_from_wait:
         R5_SEQ.append(("r5_home_to_wait", 1))  # 阶段A: 先到等待点
     R5_SEQ += [
-        ("r5_wait_to_pick", 1),          # R4完成后: 去抓取位
+        ("r5_wait_to_pick_app", 1),      # R4完成后: 先去产品上方
+        ("r5_pick_descend", 1),          # 再垂直下降抓取
         ("pick_to_good_app_avoid_r4wait", 1),
         ("good_app_to_place_zfixed2", 1),
         ("good_place_to_wait_new", 1),
@@ -292,6 +288,10 @@ def main():
 
     b.start_simulation()
     time.sleep(0.3)
+    sim.setObjectPosition(product, -1, [-1.08, 0.12, 0.2160])
+    sim.setObjectQuaternion(product, -1, [0, 0, 0, 1])  # yaw=180
+    for s in sim.getObjectsInTree(product, sim.object_shape_type, 0):
+        sim.setObjectInt32Param(s, sim.objintparam_visibility_layer, 0)
     frame = 0
 
     # 距离监测
@@ -400,18 +400,23 @@ def main():
                 # 组装完成: 成品(Inspection产品)可见, 组装件隐藏
                 for s in sim.getObjectsInTree(product, sim.object_shape_type, 0):
                     sim.setObjectInt32Param(s, sim.objintparam_visibility_layer, 1)
-                for s in sim.getObjectsInTree(box, sim.object_shape_type, 0):
-                    sim.setObjectInt32Param(s, sim.objintparam_visibility_layer, 0)
-                sim.setObjectPosition(box, -1, [3.0, 3.0, 0.5])
-                for part in (pcb, module, term):
+                for part in (box, pcb, module, term):
                     for s in sim.getObjectsInTree(part, sim.object_shape_type, 0):
                         sim.setObjectInt32Param(s, sim.objintparam_visibility_layer, 0)
+                    sim.setObjectPosition(part, -1, [3.0, 3.0, 0.5])
                 print("  [组装完成: 成品可见, 组装件隐藏]")
             elif name == "r3_product_pick_descend" and d == 1 and not attached["product"]:
                 b.set_gripper_gap("R3", 0.1564)
+                for s in sim.getObjectsInTree(product, sim.object_shape_type, 0):
+                    try:
+                        sim.setShapeMassAndInertia(s, 0.0, [0, 0, 0],
+                                                   [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+                                                   [0, 0, 0])
+                    except Exception:
+                        pass
                 b.attach_object("INSPECTION_PRODUCT", "R3")
                 attached["product"] = True
-                print("  [R3 产品 attach]")
+                print("  [R3 产品 attach (非动态)]")
             elif name == "r3_product_place_descend" and d == 1 and attached["product"]:
                 b.set_gripper_gap("R3", 0.170)
                 b.detach_object(product)
@@ -420,16 +425,17 @@ def main():
                 fire("PRODUCT_PLACED")
         elif rid == "R5":
             if name == "r5_home_to_wait" and d == 1:
-                arm.wait_event = "R4_DONE"
+                arm.wait_event = "R4_SCREW_DONE"
                 print("  [R5 到等待点, 等 R4 锁付完成]")
-            elif name == "r5_wait_to_pick" and start_from_wait and arm.wait_event is None:
-                arm.wait_event = "R4_DONE"
+            elif name == "r5_wait_to_pick_app" and start_from_wait and arm.wait_event is None:
+                arm.wait_event = "R4_SCREW_DONE"
                 print("  [R5 已在等待点, 等 R4 锁付完成]")
-            if name == "r5_wait_to_pick" and d == 1 and not attached["r5prod"]:
+            if name == "r5_pick_descend" and d == 1 and not attached["r5prod"]:
                 b.set_gripper_gap("R5", 0.150)
                 b.attach_object("INSPECTION_PRODUCT", "R5")
                 attached["r5prod"] = True
-                print("  [R5 产品 attach]")
+                arm.wait_event = "R4_AT_WAIT"
+                print("  [R5 抓取完成, 等 R4 回等待点再搬运]")
             elif name == "good_app_to_place_zfixed2" and d == 1 and attached["r5prod"]:
                 b.set_gripper_gap("R5", 0.158)
                 b.detach_object(product)
@@ -454,9 +460,12 @@ def main():
             elif name == "r4_tcp_to_press" and d == 1:
                 arm.delay_frames = 20
                 print("  [R4 锁付按压 1s]")
+            elif name == "r4_press_to_app" and d == 1:
+                fire("R4_SCREW_DONE")
+                print("  [R4 锁付完开始回程, R5 出发抓取]")
             elif name == "r4_app_to_wait" and d == 1:
-                fire("R4_DONE")
-                print("  [R4 锁付完成, 回等待点]")
+                fire("R4_AT_WAIT")
+                print("  [R4 回到等待点]")
 
     try:
         while not all(a.done for a in arms.values()):
